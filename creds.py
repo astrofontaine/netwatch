@@ -28,7 +28,10 @@ import stat
 from pathlib import Path
 from typing import Optional
 
+import logging
 from config import NETWATCH_DIR
+
+log = logging.getLogger("netwatch.vault")
 
 VAULT_FILE = NETWATCH_DIR / "vault.enc"
 SALT_FILE  = NETWATCH_DIR / ".vault.salt"   # 0600
@@ -84,19 +87,30 @@ class CredVault:
             self._data = {"_default": {"ssh": [], "snmp": []}}
             self._unlocked = True
             self._save()
+            log.info("[vault] New vault created at %s", VAULT_FILE)
             return True
 
         try:
             raw = self._fernet.decrypt(VAULT_FILE.read_bytes())
             self._data = json.loads(raw)
             self._unlocked = True
+            host_count = len([h for h in self._data if h != "_default"])
+            svc_count  = sum(
+                len(entries)
+                for host in self._data.values()
+                for entries in host.values()
+            )
+            log.info("[vault] Unlocked — %d host-specific scope(s), %d credential entry(s) total",
+                     host_count, svc_count)
             return True
         except InvalidToken:
+            log.warning("[vault] Unlock failed — wrong passphrase")
             print("Wrong passphrase.")
             self._fernet = None
             return False
 
     def lock(self) -> None:
+        log.info("[vault] Locking and saving vault to %s", VAULT_FILE)
         self._save()
         self._data = {}
         self._fernet = None
@@ -131,24 +145,32 @@ class CredVault:
         """Add or update a credential entry.  host='_default' for global."""
         self._check_unlocked()
         self._data.setdefault(host, {}).setdefault(service, [])
-        # replace existing entry for same user, or append
         entries = self._data[host][service]
         user = cred.get("user", "")
         for i, e in enumerate(entries):
             if e.get("user", "") == user:
                 entries[i] = cred
                 self._save()
+                log.info("[vault] Updated credential  host=%s  service=%s  user=%s  type=%s",
+                         host, service, user or "(none)", cred.get("type", "?"))
                 return
         entries.append(cred)
         self._save()
+        log.info("[vault] Added credential  host=%s  service=%s  user=%s  type=%s",
+                 host, service, user or "(none)", cred.get("type", "?"))
 
     def remove(self, host: str, service: str, user: str) -> bool:
         self._check_unlocked()
         entries = self._data.get(host, {}).get(service, [])
         before = len(entries)
         self._data[host][service] = [e for e in entries if e.get("user") != user]
+        removed = len(self._data[host][service]) < before
         self._save()
-        return len(self._data[host][service]) < before
+        if removed:
+            log.info("[vault] Removed credential  host=%s  service=%s  user=%s", host, service, user)
+        else:
+            log.warning("[vault] Remove: no match found  host=%s  service=%s  user=%s", host, service, user)
+        return removed
 
     def list_hosts(self) -> list[str]:
         self._check_unlocked()

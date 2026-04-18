@@ -7,6 +7,7 @@ Techniques requiring sudo receive the password via the sudo_pass argument.
 from __future__ import annotations
 import ipaddress
 import re
+import socket
 import subprocess
 import threading
 from pathlib import Path
@@ -72,8 +73,21 @@ def _t_proc_arp(subnet: str, sudo_pass: str) -> set[str]:
 
 
 def _t_ip_neigh(subnet: str, sudo_pass: str) -> set[str]:
-    """ip neigh show — neighbour table, no root needed."""
-    return _ips(_run(["ip", "neigh", "show"]))
+    """ip neigh show — neighbour table, no root needed.  Skips FAILED entries."""
+    found = set()
+    for line in _run(["ip", "neigh", "show"]).splitlines():
+        if "FAILED" in line:
+            continue
+        m = _IP_RE.search(line)
+        if m:
+            ip = m.group(1)
+            try:
+                addr = ipaddress.ip_address(ip)
+                if not addr.is_loopback and not addr.is_multicast:
+                    found.add(ip)
+            except ValueError:
+                pass
+    return found
 
 
 def _t_ping_sweep(subnet: str, sudo_pass: str) -> set[str]:
@@ -170,6 +184,98 @@ def _t_masscan(subnet: str, sudo_pass: str) -> set[str]:
     return _ips(out)
 
 
+# ── enrichment helpers ────────────────────────────────────────────────────────
+
+def get_mac(ip: str) -> str:
+    """Return the MAC address for ip, or '' if unknown.
+
+    Sources tried in order:
+      1. /proc/net/arp  (fast, kernel ARP cache)
+      2. ip neigh show  (picks up STALE entries /proc misses)
+      3. ip link show   (own interface — for the local machine's IP)
+    """
+    try:
+        text = Path("/proc/net/arp").read_text()
+        for line in text.splitlines():
+            parts = line.split()
+            if parts and parts[0] == ip and len(parts) >= 4:
+                mac = parts[3]
+                if mac != "00:00:00:00:00:00":
+                    return mac
+    except OSError:
+        pass
+
+    # ip neigh show catches STALE entries /proc/net/arp may not have
+    for line in _run(["ip", "neigh", "show", ip]).splitlines():
+        m = re.search(r'lladdr\s+([0-9a-f:]{17})', line)
+        if m:
+            return m.group(1)
+
+    # Local machine: find which interface owns this IP by scanning ip addr show
+    addr_text = _run(["ip", "addr", "show"])
+    current_iface = None
+    for line in addr_text.splitlines():
+        m = re.match(r'^\d+:\s+(\S+?)[@:]', line)
+        if m:
+            current_iface = m.group(1)
+        if current_iface and f" {ip}/" in line and "inet " in line:
+            # Found the owning interface — extract its MAC from its block
+            iface_block = _run(["ip", "link", "show", current_iface])
+            mac_m = re.search(r'link/ether\s+([0-9a-f:]{17})', iface_block)
+            if mac_m:
+                return mac_m.group(1)
+
+    return ""
+
+
+def get_hostnames(ip: str, timeout: float = 2.0) -> list[str]:
+    """Return all resolvable names for ip, deduplicated and sorted.
+
+    Sources tried:
+      1. socket.gethostbyaddr()  — system resolver (DNS + /etc/hosts + mDNS via nsswitch)
+      2. avahi-resolve-address   — mDNS (.local names) if avahi-utils is installed
+      3. nmblookup -A            — NetBIOS name if samba-client is installed
+    """
+    names: set[str] = set()
+
+    # 1 — system resolver
+    try:
+        hostname, aliases, _ = socket.gethostbyaddr(ip)
+        if hostname and hostname != ip:
+            names.add(hostname)
+        for a in aliases:
+            if a and a != ip:
+                names.add(a)
+    except (socket.herror, socket.gaierror, OSError):
+        pass
+
+    # 2 — avahi mDNS (catches .local names that the system resolver may miss)
+    if subprocess.run(["which", "avahi-resolve"], capture_output=True).returncode == 0:
+        r = _run(["avahi-resolve", "--address", ip], timeout=int(timeout) + 1)
+        for line in r.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == ip:
+                name = parts[1].rstrip(".")
+                if name and name != ip:
+                    names.add(name)
+
+    # 3 — NetBIOS (Windows/Samba/macOS hosts)
+    if subprocess.run(["which", "nmblookup"], capture_output=True).returncode == 0:
+        r = _run(["nmblookup", "-A", ip], timeout=int(timeout) + 1)
+        for line in r.splitlines():
+            # Match individual host entries — skip GROUP lines and __MSBROWSE__
+            m = re.match(r'^\s+(\S+)\s+<\w+>\s+-\s+\S+\s+<ACTIVE>', line)
+            if m and "<GROUP>" not in line:
+                name = m.group(1).strip()
+                if name not in ("__MSBROWSE__",) and name != ip:
+                    names.add(name)
+
+    result = sorted(names)
+    if result:
+        log.debug("[hostnames] %s → %s", ip, result)
+    return result
+
+
 # ── technique registry ────────────────────────────────────────────────────────
 
 TECHNIQUES: dict[str, Callable[[str, str], set[str]]] = {
@@ -219,5 +325,13 @@ class Discoverer:
             t.start()
         for t in threads:
             t.join(timeout=120)
+
+        # Filter to configured subnet — prevents stale/external IPs from
+        # ip_neigh / proc_arp polluting results.
+        try:
+            net = ipaddress.ip_network(self.subnet, strict=False)
+            all_ips = {ip for ip in all_ips if ipaddress.ip_address(ip) in net}
+        except ValueError:
+            pass
 
         return all_ips

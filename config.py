@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger("netwatch.config")
 
 NETWATCH_DIR = Path.home() / ".netwatch"
 CONFIG_FILE  = NETWATCH_DIR / "config.json"
@@ -54,8 +57,20 @@ class Config:
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "Config":
         if not path.exists():
-            return cls()
+            cfg = cls()
+            log.info("[config] No config file found — using defaults  "
+                     "(subnet=%s  interval=%ds)", cfg.subnet, cfg.interval_seconds)
+            return cfg
         with open(path) as fh:
             data = json.load(fh)
         valid = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        return cls(**valid)
+        cfg = cls(**valid)
+        log.info(
+            "[config] Loaded from %s  subnet=%s  interval=%ds  "
+            "techniques=[%s]  probes=[%s]  log_level=%s",
+            path, cfg.subnet, cfg.interval_seconds,
+            ", ".join(cfg.discovery_techniques),
+            ", ".join(cfg.access_probes),
+            cfg.log_level,
+        )
+        return cfg

