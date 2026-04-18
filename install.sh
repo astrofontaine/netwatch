@@ -16,7 +16,7 @@ APT_PKGS=(
     snmp            # snmpwalk / snmpget for device enumeration
     smbclient       # SMB/CIFS share enumeration
     sshpass         # non-interactive SSH password (accessor fallback)
-    python3-paramiko    # SSH in Python
+    python3-paramiko    # SSH in Python (netwatch + Collector)
     python3-scapy       # raw-packet sniffing / ARP
     python3-cryptography # Fernet vault encryption
 )
@@ -28,6 +28,7 @@ log "Installing: ${APT_PKGS[*]}"
 sudo apt-get install -y "${APT_PKGS[@]}"
 
 # ── Python packages (pip, user-level) ────────────────────────────────────────
+# paramiko via apt above covers netwatch + Collector; add extras here if needed
 #PIP_PKGS=(requests)
 #log "Installing Python packages: ${PIP_PKGS[*]}"
 #pip3 install --quiet --user "${PIP_PKGS[@]}"
