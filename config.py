@@ -249,6 +249,20 @@ class Config:
     # SSH: how long to wait per connection attempt (seconds)
     ssh_timeout: int = 8
 
+    # Commands run once over an established SSH session to snapshot peer identity/state.
+    # An empty list disables collection.  Designed for Collector integration.
+    ssh_state_commands: list[str] = field(default_factory=lambda: [
+        "hostname",
+        "hostnamectl --static",
+        "cat /etc/hostname",
+        "grep '^127\\.0\\.1\\.1' /etc/hosts",
+        "cat /etc/machine-id",
+        "ip -4 addr show",
+        "ip link show",
+        "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub",
+        "ssh-keygen -lf /etc/ssh/ssh_host_rsa_key.pub 2>/dev/null",
+    ])
+
     # HTTP: connect timeout
     http_timeout: int = 5
     ping_timeout_seconds: float = 1.0

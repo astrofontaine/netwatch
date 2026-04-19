@@ -5,11 +5,14 @@ Results are summarised as short strings stored in HostRecord.access_results.
 """
 
 from __future__ import annotations
+import datetime
+import json
 import logging
 import socket
 import subprocess
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -36,6 +39,36 @@ def _tcp_open(ip: str, port: int, timeout: float = 2.0) -> bool:
             return True
     except OSError:
         return False
+
+
+# ── SSH state snapshot ────────────────────────────────────────────────────────
+
+def _collect_ssh_snapshot(ip: str, user: str, client: "paramiko.SSHClient",
+                          commands: list[str]) -> None:
+    """Run ssh_state_commands over an open paramiko client and save output.
+
+    Snapshots land in ~/.netwatch/snapshots/<ip>_<timestamp>.json.
+    Intended as the hook point for future Collector integration.
+    """
+    from config import NETWATCH_DIR
+    snapshot_dir = NETWATCH_DIR / "snapshots"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    results: dict[str, str] = {}
+    for cmd in commands:
+        try:
+            _, stdout, stderr = client.exec_command(cmd, timeout=10)
+            out = stdout.read(4096).decode(errors="replace").strip()
+            err = stderr.read(512).decode(errors="replace").strip()
+            results[cmd] = out if out else err
+        except Exception as exc:
+            results[cmd] = f"ERROR: {exc}"
+
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = snapshot_dir / f"{ip}_{ts}.json"
+    payload = {"ip": ip, "user": user, "collected_at": ts, "commands": results}
+    path.write_text(json.dumps(payload, indent=2))
+    log.info("  [%s] SSH state snapshot saved → %s", ip, path)
 
 
 # ── port scan ─────────────────────────────────────────────────────────────────
@@ -123,6 +156,12 @@ def probe_ssh(ip: str, cfg: "Config", vault: "CredVault") -> str:
                     alias = prov["alias"]
             except Exception as exc:
                 log.debug("Key provisioning skipped for %s: %s", ip, exc)
+
+            if cfg.ssh_state_commands:
+                try:
+                    _collect_ssh_snapshot(ip, c["user"], client, cfg.ssh_state_commands)
+                except Exception as exc:
+                    log.debug("SSH state snapshot failed for %s: %s", ip, exc)
 
             client.close()
             suffix = f" alias={alias}" if alias else ""
