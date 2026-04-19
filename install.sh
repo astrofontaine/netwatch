@@ -13,9 +13,11 @@ APT_PKGS=(
     fping           # parallel ICMP sweep
     masscan         # high-speed port scanner
     netdiscover     # passive/active ARP discovery
+    net-tools       # arp(8) command — used by arp_table discovery technique
     snmp            # snmpwalk / snmpget for device enumeration
     smbclient       # SMB/CIFS share enumeration
     sshpass         # non-interactive SSH password (accessor fallback)
+    python3-venv        # venv support for the ./netwatch wrapper script
     python3-paramiko    # SSH in Python (netwatch + Collector)
     python3-scapy       # raw-packet sniffing / ARP
     python3-cryptography # Fernet vault encryption
@@ -41,7 +43,7 @@ chmod 700 "$NWDIR"
 log "Created $NWDIR"
 
 # ── Cron entry (every 5 minutes) ─────────────────────────────────────────────
-CRON_CMD="*/5 * * * * /usr/bin/python3 $HOME/netwatch/netwatch.py --once >> $NWDIR/logs/cron.log 2>&1"
+CRON_CMD="*/5 * * * * $HOME/netwatch/netwatch --once >> $NWDIR/logs/cron.log 2>&1"
 # Only add if not already present
 if crontab -l 2>/dev/null | grep -qF "netwatch.py"; then
     log "Cron entry already present — skipping."
