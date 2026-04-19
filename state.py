@@ -164,3 +164,25 @@ class HostState:
 
     def unassessed(self) -> list[HostRecord]:
         return [r for r in self._hosts.values() if not r.assessed]
+
+    def purge_ghosts(self) -> list[str]:
+        """Remove hosts we've never meaningfully heard from.
+
+        A host is kept if it has open ports, a MAC address, hostnames, an SSH
+        alias, or any access result that isn't a flat negative ("no X …").
+        Everything else is ARP noise that never responded to anything.
+        """
+        def _heard_from(rec: HostRecord) -> bool:
+            if rec.open_ports:
+                return True
+            if rec.mac_address or rec.ssh_alias or rec.hostnames:
+                return True
+            for result in rec.access_results.values():
+                if not result.lower().startswith("no "):
+                    return True
+            return False
+
+        ghosts = [ip for ip, rec in self._hosts.items() if not _heard_from(rec)]
+        for ip in ghosts:
+            del self._hosts[ip]
+        return sorted(ghosts)

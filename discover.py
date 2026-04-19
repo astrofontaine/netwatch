@@ -665,6 +665,51 @@ def get_hostnames(ip: str, timeout: float = 2.0) -> list[str]:
     return result
 
 
+def dns_reverse_lookup(ip: str) -> str:
+    """Return the best short hostname for ip from reverse DNS, or ''.
+
+    Tries socket.gethostbyaddr (covers DNS + /etc/hosts + nsswitch),
+    then avahi-resolve for mDNS .local names.  Strips .local suffix and
+    prefers shorter names so the alias column stays readable.
+    """
+    names: list[str] = []
+
+    try:
+        hostname, aliases, _ = socket.gethostbyaddr(ip)
+        if hostname and hostname != ip:
+            names.append(hostname)
+        for a in aliases:
+            if a and a != ip:
+                names.append(a)
+    except (socket.herror, socket.gaierror, OSError):
+        pass
+
+    if subprocess.run(["which", "avahi-resolve"], capture_output=True).returncode == 0:
+        r = _run(["avahi-resolve", "--address", ip], timeout=3)
+        for line in r.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == ip:
+                name = parts[1].rstrip(".")
+                if name and name != ip:
+                    names.append(name)
+
+    if not names:
+        return ""
+
+    # Score: prefer .local-stripped plain names, then plain names, then FQDNs
+    scored: list[tuple[int, str]] = []
+    for raw in names:
+        name = raw.rstrip(".")
+        if name.endswith(".local"):
+            scored.append((0, name[:-6]))
+        elif "." not in name:
+            scored.append((1, name))
+        else:
+            scored.append((2, name))
+    scored.sort()
+    return scored[0][1]
+
+
 # ── technique registry ────────────────────────────────────────────────────────
 
 TECHNIQUES: dict[str, Callable[[str, str], set[str]]] = {

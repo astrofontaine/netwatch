@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, NETWATCH_DIR
 from creds import CredVault, MissingDependencyError
-from discover import Discoverer, get_local_services, get_mac, get_hostnames
+from discover import Discoverer, get_local_services, get_mac, get_hostnames, dns_reverse_lookup
 from accessor import Accessor
 from state import HostState
 
@@ -221,6 +221,11 @@ def _enrich_identity(state: HostState, ips: set[str]) -> None:
         rec = state.get(ip)
         if rec and sorted(rec.hostnames) != names:
             state.update_record(ip, hostnames=names)
+        # Populate alias from DNS if not yet set or still just the raw IP
+        if rec and (not rec.ssh_alias or rec.ssh_alias == ip):
+            best = names[0] if names else dns_reverse_lookup(ip)
+            if best:
+                state.update_record(ip, ssh_alias=best)
     for ip, services in local_services.items():
         rec = state.get(ip)
         if rec and sorted(rec.local_services) != services:
@@ -308,6 +313,38 @@ def cmd_list_hosts_long(state: HostState) -> None:
             if negatives:
                 print(f"  {'no data:':<12} {', '.join(negatives)}")
 
+
+
+def cmd_refresh_dns(state: HostState) -> None:
+    """Reverse-DNS all known hosts and populate ssh_alias where unset."""
+    import threading
+    lock = threading.Lock()
+    updated: list[str] = []
+
+    def lookup(rec) -> None:
+        name = dns_reverse_lookup(rec.ip)
+        if not name:
+            return
+        with lock:
+            if not rec.ssh_alias or rec.ssh_alias == rec.ip:
+                state.update_record(rec.ip, ssh_alias=name)
+                updated.append(f"{rec.ip} → {name}")
+
+    threads = [threading.Thread(target=lookup, args=(r,), daemon=True)
+               for r in state.all_hosts()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    if updated:
+        state.save()
+        log.info("[dns] Updated %d alias(es): %s", len(updated), ", ".join(updated))
+        for entry in updated:
+            print(f"  {entry}")
+    else:
+        log.info("[dns] No new aliases found.")
+        print("  No new DNS aliases found.")
 
 
 def cmd_force_assess(ip: str, cfg: Config, vault: CredVault, state: HostState) -> None:
@@ -943,8 +980,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("-S", "--ssh-status",     metavar="IP",   help="verify SSH/SCP access both directions")
     p.add_argument("-A", "--set-alias", nargs=2, metavar=("IP", "NAME"), help="set friendly name for a host (updates ssh config + /etc/hosts)")
     p.add_argument("-y", "--sync-aliases", action="store_true", help="push all SSH aliases to every reachable host")
-    p.add_argument("-n", "--no-sudo",   action="store_true", help="skip privileged techniques")
-    p.add_argument("-q", "--quiet",     action="store_true", help="suppress INFO logs")
+    p.add_argument("-r", "--refresh-dns",  action="store_true", help="reverse-DNS all known hosts and populate alias where unset")
+    p.add_argument("-n", "--no-sudo",      action="store_true", help="skip privileged techniques")
+    p.add_argument("-q", "--quiet",        action="store_true", help="suppress INFO logs")
+    p.add_argument("--purge-ghosts",       action="store_true", help="remove hosts never meaningfully heard from, then save")
     return p.parse_args()
 
 
@@ -1035,6 +1074,23 @@ def main() -> None:
 
     if args.sync_aliases:
         cmd_sync_aliases(state, quiet=False)
+        if not _more:
+            return
+
+    if args.refresh_dns:
+        cmd_refresh_dns(state)
+        if not _more:
+            return
+
+    if args.purge_ghosts:
+        removed = state.purge_ghosts()
+        if removed:
+            print(f"Purged {len(removed)} ghost host(s):")
+            for ip in removed:
+                print(f"  {ip}")
+            state.save()
+        else:
+            print("No ghost hosts found — nothing to purge.")
         if not _more:
             return
 
