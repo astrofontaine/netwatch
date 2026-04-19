@@ -25,6 +25,7 @@ import getpass
 import json
 import os
 import stat
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -33,8 +34,10 @@ from config import NETWATCH_DIR
 
 log = logging.getLogger("netwatch.vault")
 
-VAULT_FILE = NETWATCH_DIR / "vault.enc"
-SALT_FILE  = NETWATCH_DIR / ".vault.salt"   # 0600
+VAULT_FILE   = NETWATCH_DIR / "vault.enc"
+SALT_FILE    = NETWATCH_DIR / ".vault.salt"   # 0600
+SESSION_FILE = NETWATCH_DIR / ".session"      # 0600, TTL-limited key cache
+SESSION_TTL  = 8 * 3600                       # seconds
 
 
 class MissingDependencyError(RuntimeError):
@@ -60,6 +63,35 @@ def _derive_key(passphrase: str, salt: bytes) -> bytes:
         iterations=480_000,
     )
     return base64.urlsafe_b64encode(kdf.derive(passphrase.encode()))
+
+
+def _load_session_key() -> Optional[bytes]:
+    """Return cached Fernet key bytes if session is still valid, else None."""
+    if not SESSION_FILE.exists():
+        return None
+    try:
+        data = json.loads(SESSION_FILE.read_text())
+        if time.time() < data["expires"]:
+            return base64.urlsafe_b64decode(data["key"])
+    except Exception:
+        pass
+    return None
+
+
+def _save_session_key(key: bytes) -> None:
+    """Persist Fernet key with an expiry timestamp."""
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SESSION_FILE.write_text(json.dumps({
+        "expires": time.time() + SESSION_TTL,
+        "key": base64.urlsafe_b64encode(key).decode(),
+    }))
+    SESSION_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
+def clear_session() -> None:
+    """Invalidate the cached session (e.g. after passphrase change)."""
+    if SESSION_FILE.exists():
+        SESSION_FILE.unlink()
 
 
 def _load_salt() -> bytes:
@@ -93,11 +125,18 @@ class CredVault:
                 "requirements.txt into the interpreter you launched."
             ) from exc
 
-        if passphrase is None:
-            passphrase = getpass.getpass("Vault passphrase: ")
+        # Try session cache first (skips passphrase derivation entirely)
+        cached_key = _load_session_key()
+        if passphrase is None and cached_key is None:
+            passphrase = os.environ.get("NETWATCH_VAULT_PASS") or getpass.getpass("Vault passphrase: ")
 
-        salt = _load_salt()
-        key  = _derive_key(passphrase, salt)
+        if cached_key is not None:
+            key = cached_key
+            log.debug("[vault] Using cached session key")
+        else:
+            salt = _load_salt()
+            key  = _derive_key(passphrase, salt)
+
         self._fernet = Fernet(key)
 
         if not VAULT_FILE.exists():
@@ -105,6 +144,7 @@ class CredVault:
             self._data = {"_default": {"ssh": [], "snmp": []}}
             self._unlocked = True
             self._save()
+            _save_session_key(key)
             log.info("[vault] New vault created at %s", VAULT_FILE)
             return True
 
@@ -112,6 +152,7 @@ class CredVault:
             raw = self._fernet.decrypt(VAULT_FILE.read_bytes())
             self._data = json.loads(raw)
             self._unlocked = True
+            _save_session_key(key)
             host_count = len([h for h in self._data if h != "_default"])
             svc_count  = sum(
                 len(entries)
@@ -122,6 +163,7 @@ class CredVault:
                      host_count, svc_count)
             return True
         except InvalidToken:
+            clear_session()
             log.warning("[vault] Unlock failed — wrong passphrase")
             print("Wrong passphrase.")
             self._fernet = None

@@ -84,7 +84,38 @@ def _update_ssh_config_local(ip: str, user: str, alias: str = "") -> str:
     """Add/replace a marker-delimited Host block for ip. Returns alias used."""
     if not alias:
         alias = ip
+
+    # Preserve any existing HostName/Port override (e.g. tunnel routing).
+    # Read effective params BEFORE overwriting so tunnel configs survive re-provision.
+    hostname, port = ip, 22
+    SSH_CONFIG.touch(mode=0o600)
+    existing = SSH_CONFIG.read_text()
+    if f"# >>> netwatch: {ip}" in existing:
+        try:
+            r = subprocess.run(["ssh", "-G", alias],
+                               capture_output=True, text=True, timeout=3)
+            for line in r.stdout.splitlines():
+                k, _, v = line.partition(' ')
+                if k == 'hostname':
+                    hostname = v
+                elif k == 'port' and v.isdigit():
+                    port = int(v)
+        except Exception:
+            pass
+
+    port_line = f"    Port {port}\n" if port != 22 else ""
+    host_ident = NETWATCH_KEY
     block = (
+        f"# >>> netwatch: {ip}\n"
+        f"Host {alias}\n"
+        f"    HostName {hostname}\n"
+        f"{port_line}"
+        f"    User {user}\n"
+        f"    IdentityFile {host_ident}\n"
+        f"    StrictHostKeyChecking no\n"
+        f"    UserKnownHostsFile /dev/null\n"
+        f"# <<< netwatch: {ip}\n"
+    ) if hostname != ip or port != 22 else (
         f"# >>> netwatch: {ip}\n"
         f"Host {alias}\n"
         f"    HostName {ip}\n"
@@ -94,10 +125,8 @@ def _update_ssh_config_local(ip: str, user: str, alias: str = "") -> str:
         f"    UserKnownHostsFile {KNOWN_HOSTS}\n"
         f"# <<< netwatch: {ip}\n"
     )
-    SSH_CONFIG.touch(mode=0o600)
     SSH_CONFIG.chmod(0o600)
-    text = SSH_CONFIG.read_text()
-    text = _replace_or_append_block(text, ip, block)
+    text = _replace_or_append_block(existing, ip, block)
     SSH_CONFIG.write_text(text)
     log.info("  Updated our ~/.ssh/config: Host %s", alias)
     return alias
@@ -133,7 +162,18 @@ def _replace_or_append_block(text: str, ip: str, block: str) -> str:
         re.MULTILINE | re.DOTALL,
     )
     if pattern.search(text):
-        return pattern.sub(block, text)
+        # Replace first occurrence only, remove any duplicates; use a callable
+        # to avoid re.sub backreference processing on the block string.
+        replaced = False
+        def _once(m):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                return block
+            return ''
+        text = pattern.sub(_once, text)
+        # Collapse runs of blank lines left behind by removed duplicate blocks.
+        return re.sub(r'\n{3,}', '\n\n', text)
     # append with a blank separator
     sep = "\n" if text and not text.endswith("\n\n") else ""
     return text.rstrip("\n") + "\n" + sep + block
