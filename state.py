@@ -41,11 +41,15 @@ class HostRecord:
     mac_address: str       = ""
     ssh_alias: str         = ""
     ssh_provisioned: bool  = False
+    # Free-form cache for raw/heterogeneous host data (probe artifacts, snapshots, etc.).
+    # This is intentionally not schema-constrained; consumers can parse later.
+    cache: list[dict]      = field(default_factory=list)
     # Append-only change log — capped at MAX_HISTORY entries per host
     history: list[dict]    = field(default_factory=list)
 
 
 MAX_HISTORY = 500   # entries per host before oldest are dropped
+MAX_CACHE   = 2000  # entries per host before oldest are dropped
 
 _VALID_FIELDS = {f.name for f in dc_fields(HostRecord)}
 
@@ -56,6 +60,18 @@ class HostState:
     def __init__(self) -> None:
         self._hosts: dict[str, HostRecord] = {}
 
+    # ── cache ────────────────────────────────────────────────────────────────
+
+    def _append_cache(self, ip: str, event: str, **kw) -> None:
+        rec = self._hosts.get(ip)
+        if rec is None:
+            return
+        entry: dict = {"ts": _now(), "event": event}
+        entry.update(kw)
+        rec.cache.append(entry)
+        if len(rec.cache) > MAX_CACHE:
+            rec.cache = rec.cache[-MAX_CACHE:]
+
     # ── disk I/O ─────────────────────────────────────────────────────────────
 
     def load(self, path: Path = STATE_FILE) -> None:
@@ -65,6 +81,7 @@ class HostState:
         with open(path) as fh:
             raw = json.load(fh)
         for ip, rec in raw.items():
+            had_cache = "cache" in rec
             if "services" in rec:
                 rec["services"] = {int(k): v for k, v in rec["services"].items()}
             if "last_heard_from" not in rec:
@@ -72,7 +89,12 @@ class HostState:
             rec.pop("last_seen", None)
             # Defensive: ignore keys added/removed across versions
             safe = {k: v for k, v in rec.items() if k in _VALID_FIELDS}
-            self._hosts[ip] = HostRecord(**safe)
+            host = HostRecord(**safe)
+            self._hosts[ip] = host
+            # Migration: older state files won't have `cache`; seed it with a snapshot.
+            if not had_cache:
+                snapshot = {k: v for k, v in safe.items() if k != "history"}
+                self._append_cache(ip, "migrated_snapshot", data=snapshot)
         log.info("[state] Loaded %d host record(s) from %s", len(self._hosts), path)
 
     def save(self, path: Path = STATE_FILE) -> None:
@@ -143,6 +165,7 @@ class HostState:
         if rec is None:
             log.warning("[state] update_record called for unknown host %s — skipping", ip)
             return
+        changed: dict[str, dict] = {}
         for k, v in kwargs.items():
             if k not in _VALID_FIELDS:
                 log.debug("[state] %s  ignoring unknown field %r", ip, k)
@@ -157,7 +180,11 @@ class HostState:
             log.info("[state] %s  %-18s  %s  →  %s", ip, k, _fmt(old), _fmt(v))
             self._append_history(ip, "field_changed", field=k,
                                  old=old, new=v)
+            changed[k] = {"old": old, "new": v}
             setattr(rec, k, v)
+        # Free-form cache: capture the raw attempted update plus diff of what changed.
+        if changed:
+            self._append_cache(ip, "update_record", changed=changed, raw=kwargs)
 
     def all_hosts(self) -> list[HostRecord]:
         return sorted(self._hosts.values(), key=lambda r: r.ip)
@@ -176,6 +203,8 @@ class HostState:
             if rec.open_ports:
                 return True
             if rec.mac_address or rec.ssh_alias or rec.hostnames:
+                return True
+            if rec.cache:
                 return True
             for result in rec.access_results.values():
                 if not result.lower().startswith("no "):
