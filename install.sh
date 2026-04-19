@@ -6,6 +6,12 @@ set -euo pipefail
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
+if ! command -v apt-get >/dev/null 2>&1; then
+    log "install.sh currently supports apt-based Linux hosts only."
+    log "On macOS, use ./netwatch for interactive runs instead of install.sh."
+    exit 1
+fi
+
 # ── APT packages ─────────────────────────────────────────────────────────────
 APT_PKGS=(
     nmap            # TCP/UDP port scan + OS/service detection
@@ -45,7 +51,7 @@ log "Created $NWDIR"
 # ── Cron entry (every 5 minutes) ─────────────────────────────────────────────
 CRON_CMD="*/5 * * * * $HOME/netwatch/netwatch --once >> $NWDIR/logs/cron.log 2>&1"
 # Only add if not already present
-if crontab -l 2>/dev/null | grep -qF "netwatch.py"; then
+if crontab -l 2>/dev/null | grep -qF "$HOME/netwatch/netwatch --once"; then
     log "Cron entry already present — skipping."
 else
     (crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -
@@ -53,4 +59,4 @@ else
 fi
 
 log "Installation complete."
-log "Next: run  python3 ~/netwatch/netwatch.py --add-cred  to populate the vault."
+log "Next: run  ~/netwatch/netwatch --add-cred  to populate the vault."

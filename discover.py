@@ -41,6 +41,7 @@ _LOCAL_PROTOCOL_CACHE: dict[str, object] = {
     "ttl": 20.0,
     "hosts": {},
 }
+_LOCAL_PROTOCOL_LOCK = threading.Lock()
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ def _ips(text: str, exclude: set[str] | None = None) -> set[str]:
         ip = m.group(1)
         try:
             addr = ipaddress.ip_address(ip)
-            if addr.is_loopback or addr.is_multicast:
+            if addr.is_loopback or addr.is_multicast or addr.is_unspecified:
                 continue
             if exclude and ip in exclude:
                 continue
@@ -321,28 +322,29 @@ def _discover_ssdp_hosts(timeout: float = 1.0) -> dict[str, dict[str, set[str]]]
 
 
 def _get_local_protocol_hosts(force_refresh: bool = False) -> dict[str, dict[str, set[str]]]:
-    cached_hosts = _LOCAL_PROTOCOL_CACHE.get("hosts", {})
-    now = time.time()
-    if (
-        not force_refresh
-        and cached_hosts
-        and now - float(_LOCAL_PROTOCOL_CACHE.get("ts", 0.0)) < float(_LOCAL_PROTOCOL_CACHE.get("ttl", 20.0))
-    ):
-        return cached_hosts  # type: ignore[return-value]
+    with _LOCAL_PROTOCOL_LOCK:
+        cached_hosts = _LOCAL_PROTOCOL_CACHE.get("hosts", {})
+        now = time.time()
+        if (
+            not force_refresh
+            and cached_hosts
+            and now - float(_LOCAL_PROTOCOL_CACHE.get("ts", 0.0)) < float(_LOCAL_PROTOCOL_CACHE.get("ttl", 20.0))
+        ):
+            return cached_hosts  # type: ignore[return-value]
 
-    hosts: dict[str, dict[str, set[str]]] = {}
-    for discovered in (_discover_mdns_hosts(), _discover_ssdp_hosts()):
-        for ip, entry in discovered.items():
-            _merge_local_protocol_host(
-                hosts, ip,
-                names=entry["names"],
-                services=entry["services"],
-                source=",".join(sorted(entry["sources"])),
-            )
+        hosts: dict[str, dict[str, set[str]]] = {}
+        for discovered in (_discover_mdns_hosts(), _discover_ssdp_hosts()):
+            for ip, entry in discovered.items():
+                _merge_local_protocol_host(
+                    hosts, ip,
+                    names=entry["names"],
+                    services=entry["services"],
+                    source=",".join(sorted(entry["sources"])),
+                )
 
-    _LOCAL_PROTOCOL_CACHE["ts"] = now
-    _LOCAL_PROTOCOL_CACHE["hosts"] = hosts
-    return hosts
+        _LOCAL_PROTOCOL_CACHE["ts"] = now
+        _LOCAL_PROTOCOL_CACHE["hosts"] = hosts
+        return hosts
 
 
 # ── individual techniques ─────────────────────────────────────────────────────
@@ -423,14 +425,29 @@ def _t_ping_sweep(subnet: str, sudo_pass: str) -> set[str]:
 
 def _t_arp_table(subnet: str, sudo_pass: str) -> set[str]:
     """Parse the system ARP cache via arp(8), which exists on macOS and many Linux hosts."""
+    try:
+        net = ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        return set()
     out = _run(["arp", "-an"])
-    return _ips(out)
+    return {
+        ip for ip in _ips(out)
+        if ipaddress.ip_address(ip) in net
+        and ipaddress.ip_address(ip) not in (net.network_address, net.broadcast_address)
+    }
 
 
 def _t_mdns_browse(subnet: str, sudo_pass: str) -> set[str]:
     """Browse Bonjour/mDNS advertisements and resolve them to IPv4 hosts."""
-    hosts = _get_local_protocol_hosts(force_refresh=True)
-    return {ip for ip, entry in hosts.items() if "mdns" in entry["sources"]}
+    try:
+        net = ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        return set()
+    hosts = _get_local_protocol_hosts()
+    return {
+        ip for ip, entry in hosts.items()
+        if "mdns" in entry["sources"] and ipaddress.ip_address(ip) in net
+    }
 
 
 def _t_fping(subnet: str, sudo_pass: str) -> set[str]:
@@ -532,8 +549,15 @@ def _t_tcp_connect_sweep(subnet: str, sudo_pass: str) -> set[str]:
 
 def _t_ssdp(subnet: str, sudo_pass: str) -> set[str]:
     """Discover UPnP/SSDP-speaking hosts via multicast M-SEARCH."""
-    hosts = _get_local_protocol_hosts(force_refresh=True)
-    return {ip for ip, entry in hosts.items() if "ssdp" in entry["sources"]}
+    try:
+        net = ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        return set()
+    hosts = _get_local_protocol_hosts()
+    return {
+        ip for ip, entry in hosts.items()
+        if "ssdp" in entry["sources"] and ipaddress.ip_address(ip) in net
+    }
 
 
 # ── enrichment helpers ────────────────────────────────────────────────────────
@@ -679,6 +703,8 @@ class Discoverer:
         all_ips: set[str] = set()
         lock = threading.Lock()
         target_subnets = [self.subnet] + [s for s in self.extra_subnets if s != self.subnet]
+        if any(t in {"mdns_browse", "ssdp"} for t in self.techniques):
+            _get_local_protocol_hosts(force_refresh=True)
 
         def run_technique(name: str, subnet: str) -> None:
             fn = TECHNIQUES.get(name)
@@ -701,16 +727,23 @@ class Discoverer:
         ]
         for t in threads:
             t.start()
+        deadline = time.time() + 120
         for t in threads:
-            t.join(timeout=120)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            t.join(timeout=remaining)
 
-        # Filter to configured subnet — prevents stale/external IPs from
-        # ip_neigh / proc_arp polluting results.
+        # Filter to candidate subnets and drop network/broadcast addresses.
         try:
             nets = [ipaddress.ip_network(subnet, strict=False) for subnet in target_subnets]
             all_ips = {
                 ip for ip in all_ips
-                if any(ipaddress.ip_address(ip) in net for net in nets)
+                if any(
+                    ipaddress.ip_address(ip) in net
+                    and ipaddress.ip_address(ip) not in (net.network_address, net.broadcast_address)
+                    for net in nets
+                )
             }
         except ValueError:
             pass

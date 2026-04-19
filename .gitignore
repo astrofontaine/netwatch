@@ -4,3 +4,8 @@ __pycache__/
 .tmphome/
 .tmphome2/
 .tmphome3/
+.directcheck/
+.testrun/
+.testrunfix/
+.testrunfix2/
+.testrunfix3/

@@ -43,9 +43,9 @@ Run once as a sudoer:
 ./install.sh
 ```
 
-Installs apt packages: `nmap`, `arp-scan`, `fping`, `masscan`, `netdiscover`, `snmp`, `smbclient`, `sshpass`, `python3-paramiko`, `python3-scapy`, `python3-cryptography`.
+Installs apt packages: `nmap`, `arp-scan`, `fping`, `masscan`, `netdiscover`, `net-tools`, `snmp`, `smbclient`, `sshpass`, `python3-venv`, `python3-paramiko`, `python3-scapy`, `python3-cryptography`.
 
-Also installs a cron entry: `*/5 * * * * python3 /path/to/netwatch.py --once`.
+Also installs a cron entry: `*/5 * * * * /path/to/netwatch --once`.
 
 For interactive local use, prefer the repo launcher:
 
@@ -54,6 +54,8 @@ For interactive local use, prefer the repo launcher:
 ```
 
 It uses the project's `.venv` and avoids broken system `python3` shims on machines like this macOS setup.
+
+`install.sh` is currently for apt-based Linux hosts. On macOS, use `./netwatch` directly.
 
 ---
 

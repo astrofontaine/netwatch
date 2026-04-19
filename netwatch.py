@@ -193,6 +193,7 @@ def _short_ts(iso: str) -> str:
 def _enrich_identity(state: HostState, ips: set[str]) -> None:
     """Resolve hostnames and local protocol observations for a set of IPs."""
     import threading
+    import time
     lock = threading.Lock()
     results: dict[str, list[str]] = {}
     local_services: dict[str, list[str]] = {}
@@ -209,8 +210,12 @@ def _enrich_identity(state: HostState, ips: set[str]) -> None:
     threads = [threading.Thread(target=resolve, args=(ip,), daemon=True) for ip in ips]
     for t in threads:
         t.start()
+    deadline = time.time() + 10
     for t in threads:
-        t.join(timeout=10)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        t.join(timeout=remaining)
 
     for ip, names in results.items():
         rec = state.get(ip)
@@ -944,12 +949,13 @@ def main() -> None:
     args = parse_args()
 
     cfg = Config.load()
+    runtime_sudo_required = cfg.sudo_required
     if args.subnet:
         cfg.subnet = args.subnet
         cfg.extra_subnets = []
         cfg.successful_subnets = []
     if args.no_sudo:
-        cfg.sudo_required = False
+        runtime_sudo_required = False
     if args.quiet:
         cfg.log_level = "WARNING"
 
@@ -959,7 +965,7 @@ def main() -> None:
              "successful_subnets=[%s]  interval=%ds  sudo=%s",
              os.getpid(), cfg.subnet, ", ".join(cfg.extra_subnets),
              ", ".join(cfg.successful_subnets),
-             cfg.interval_seconds, cfg.sudo_required)
+             cfg.interval_seconds, runtime_sudo_required)
     log.info("    discovery : %s", "  ".join(cfg.discovery_techniques))
     log.info("    probes    : %s", "  ".join(cfg.access_probes))
 
@@ -1046,7 +1052,9 @@ def main() -> None:
         return
 
     # ── sudo ──────────────────────────────────────────────────────────────────
-    sudo_pass = get_sudo_pass(cfg)
+    sudo_cfg = Config(**cfg.__dict__)
+    sudo_cfg.sudo_required = runtime_sudo_required
+    sudo_pass = get_sudo_pass(sudo_cfg)
     accessor  = Accessor(cfg, vault)
 
     # ── run ───────────────────────────────────────────────────────────────────

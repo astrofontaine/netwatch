@@ -207,9 +207,6 @@ def default_discovery_techniques() -> list[str]:
     if system == "Darwin":
         return [
             "arp_table",
-            "mdns_browse",
-            "ssdp",
-            "ping_sweep",
             "tcp_connect_sweep",
         ]
     return [
@@ -256,6 +253,7 @@ class Config:
     http_timeout: int = 5
     ping_timeout_seconds: float = 1.0
     tcp_sweep_timeout_seconds: float = 0.2
+    portscan_connect_timeout_seconds: float = 0.25
 
     log_level: str = "INFO"
 

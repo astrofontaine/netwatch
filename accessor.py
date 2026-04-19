@@ -9,6 +9,7 @@ import logging
 import socket
 import subprocess
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -63,9 +64,19 @@ def probe_portscan(ip: str, cfg: "Config") -> dict[int, str]:
                 open_ports[int(m.group(1))] = f"{m.group(2)} {m.group(3)}".strip()
     else:
         # fallback: raw socket connect scan
-        for port in TOP_PORTS:
-            if _tcp_open(ip, port, timeout=1.5):
-                open_ports[port] = "open"
+        timeout = getattr(cfg, "portscan_connect_timeout_seconds", 0.25)
+        with ThreadPoolExecutor(max_workers=min(32, len(TOP_PORTS))) as pool:
+            futures = {
+                pool.submit(_tcp_open, ip, port, timeout): port
+                for port in TOP_PORTS
+            }
+            for future in as_completed(futures):
+                port = futures[future]
+                try:
+                    if future.result():
+                        open_ports[port] = "open"
+                except Exception:
+                    continue
 
     return open_ports
 
