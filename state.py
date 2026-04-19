@@ -30,7 +30,7 @@ def _fmt(v) -> str:
 class HostRecord:
     ip: str
     first_seen: str        = field(default_factory=_now)
-    last_seen: str         = field(default_factory=_now)
+    last_heard_from: str   = field(default_factory=_now)
     hostnames: list[str]   = field(default_factory=list)
     local_services: list[str] = field(default_factory=list)
     open_ports: list[int]  = field(default_factory=list)
@@ -67,6 +67,9 @@ class HostState:
         for ip, rec in raw.items():
             if "services" in rec:
                 rec["services"] = {int(k): v for k, v in rec["services"].items()}
+            if "last_heard_from" not in rec:
+                rec["last_heard_from"] = rec.get("last_seen", _now())
+            rec.pop("last_seen", None)
             # Defensive: ignore keys added/removed across versions
             safe = {k: v for k, v in rec.items() if k in _VALID_FIELDS}
             self._hosts[ip] = HostRecord(**safe)
@@ -113,9 +116,9 @@ class HostState:
             if rec:
                 ports_str = ", ".join(str(p) for p in sorted(rec.open_ports)) or "none"
                 log.info(
-                    "[state] HOST WENT OFFLINE: %s  (last_seen=%s  ports=%s  "
+                    "[state] HOST WENT OFFLINE: %s  (last_heard_from=%s  ports=%s  "
                     "alias=%s  assessed=%s)",
-                    ip, rec.last_seen, ports_str,
+                    ip, rec.last_heard_from, ports_str,
                     rec.ssh_alias or "—", rec.assessed,
                 )
                 # Log prior probe results so nothing is silently lost
@@ -127,7 +130,7 @@ class HostState:
 
         for ip in live_ips:
             if ip in self._hosts:
-                self._hosts[ip].last_seen = _now()
+                self._hosts[ip].last_heard_from = _now()
 
         return new, gone
 
@@ -147,8 +150,8 @@ class HostState:
             old = getattr(rec, k)
             if old == v:
                 continue
-            # Skip noisy last_seen churn — tracked by update() already
-            if k == "last_seen":
+            # Skip noisy last_heard_from churn — tracked by update() already
+            if k == "last_heard_from":
                 setattr(rec, k, v)
                 continue
             log.info("[state] %s  %-18s  %s  →  %s", ip, k, _fmt(old), _fmt(v))

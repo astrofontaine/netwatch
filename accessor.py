@@ -81,28 +81,9 @@ def probe_portscan(ip: str, cfg: "Config") -> dict[int, str]:
     return open_ports
 
 
-# ── SSH ───────────────────────────────────────────────────────────────────────
-
-def _ssh_effective_params(ip: str) -> tuple[str, int]:
-    """Return (hostname, port) from ~/.ssh/config for ip, falling back to (ip, 22)."""
-    try:
-        r = subprocess.run(["ssh", "-G", ip], capture_output=True, text=True, timeout=3)
-        hostname, port = ip, 22
-        for line in r.stdout.splitlines():
-            k, _, v = line.partition(' ')
-            if k == 'hostname':
-                hostname = v
-            elif k == 'port':
-                port = int(v)
-        return hostname, port
-    except Exception:
-        return ip, 22
-
-
 def probe_ssh(ip: str, cfg: "Config", vault: "CredVault") -> str:
     """Try stored SSH credentials.  Returns result summary."""
-    conn_host, conn_port = _ssh_effective_params(ip)
-    if not _tcp_open(conn_host, conn_port):
+    if not _tcp_open(ip, 22):
         return "port closed"
 
     try:
@@ -121,11 +102,11 @@ def probe_ssh(ip: str, cfg: "Config", vault: "CredVault") -> str:
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
             if c.get("type") == "key_path":
-                client.connect(conn_host, port=conn_port, username=c["user"],
+                client.connect(ip, port=22, username=c["user"],
                                key_filename=c["secret"],
                                timeout=cfg.ssh_timeout, allow_agent=True)
             else:
-                client.connect(conn_host, port=conn_port, username=c["user"],
+                client.connect(ip, port=22, username=c["user"],
                                password=c["secret"],
                                timeout=cfg.ssh_timeout, allow_agent=False,
                                look_for_keys=False)
@@ -267,19 +248,15 @@ class Accessor:
         if "portscan" in probes:
             log.info("  [%s] port scan", ip)
             open_ports = probe_portscan(ip, self.cfg)
-            # Fallback: if nmap found nothing (e.g. macOS firewall or tunnel host),
-            # verify critical ports via plain TCP connect so SSH/HTTP probes still fire.
-            # For tunneled hosts the SSH config may redirect port 22 → a different addr:port.
+            # Fallback: if nmap found nothing, verify critical ports via direct TCP
+            # connect so SSH/HTTP probes still fire without consulting local SSH config.
             if not open_ports:
-                conn_host, conn_port = _ssh_effective_params(ip)
                 for port, banner in [(22, "ssh"), (80, "http"), (443, "https"),
                                      (8080, "http-alt"), (445, "microsoft-ds")]:
-                    check_host = conn_host if port == 22 else ip
-                    check_port = conn_port if port == 22 else port
-                    if _tcp_open(check_host, check_port, timeout=2.0):
+                    if _tcp_open(ip, port, timeout=2.0):
                         open_ports[port] = f"{banner} (tcp-verified)"
-                        log.info("  [%s] nmap missed port %d — confirmed via TCP connect (%s:%d)",
-                                 ip, port, check_host, check_port)
+                        log.info("  [%s] nmap missed port %d — confirmed via direct TCP connect",
+                                 ip, port)
             results["portscan"] = (
                 ", ".join(f"{p}/{s}" for p, s in sorted(open_ports.items()))
                 or "no open ports found"

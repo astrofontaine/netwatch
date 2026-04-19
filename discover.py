@@ -682,6 +682,24 @@ TECHNIQUES: dict[str, Callable[[str, str], set[str]]] = {
     "tcp_connect_sweep": _t_tcp_connect_sweep,
 }
 
+ACTIVE_TECHNIQUES = {
+    "ping_sweep",
+    "fping",
+    "nmap_ping",
+    "arp_scan",
+    "netdiscover",
+    "masscan",
+    "tcp_connect_sweep",
+}
+
+PASSIVE_TECHNIQUES = {
+    "ip_neigh",
+    "proc_arp",
+    "arp_table",
+    "mdns_browse",
+    "ssdp",
+}
+
 
 # ── Discoverer ────────────────────────────────────────────────────────────────
 
@@ -701,6 +719,8 @@ class Discoverer:
     def discover(self) -> set[str]:
         """Run all configured techniques in parallel, return merged IP set."""
         all_ips: set[str] = set()
+        active_ips: set[str] = set()
+        passive_ips: set[str] = set()
         lock = threading.Lock()
         target_subnets = [self.subnet] + [s for s in self.extra_subnets if s != self.subnet]
         if any(t in {"mdns_browse", "ssdp"} for t in self.techniques):
@@ -717,6 +737,10 @@ class Discoverer:
                 log.info("  [%s] %s → %d host(s)", name, subnet, len(found))
                 with lock:
                     all_ips.update(found)
+                    if name in ACTIVE_TECHNIQUES:
+                        active_ips.update(found)
+                    elif name in PASSIVE_TECHNIQUES:
+                        passive_ips.update(found)
             except Exception as exc:
                 log.warning("  [%s] %s error: %s", name, subnet, exc)
 
@@ -747,5 +771,15 @@ class Discoverer:
             }
         except ValueError:
             pass
+
+        if active_ips:
+            passive_only = sorted(ip for ip in passive_ips if ip not in active_ips)
+            if passive_only:
+                log.info(
+                    "Ignoring %d passive-only host(s) from cache-based discovery: %s",
+                    len(passive_only),
+                    ", ".join(passive_only[:12]) + (" …" if len(passive_only) > 12 else ""),
+                )
+            return active_ips
 
         return all_ips

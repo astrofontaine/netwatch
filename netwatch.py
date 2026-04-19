@@ -257,13 +257,13 @@ def cmd_list_hosts(state: HostState) -> None:
     if not hosts:
         print("No hosts in state yet.")
         return
-    hdr = f"  {'IP':<17} {'Alias':<16} {'Ports':<16} {'Last seen':<17} Hits"
+    hdr = f"  {'IP':<17} {'Alias':<16} {'Ports':<16} {'Last heard':<17} Hits"
     print(f"\n{hdr}")
     print("  " + "─" * (len(hdr) - 2))
     for r in hosts:
         alias  = r.ssh_alias or "—"
         ports  = ",".join(str(p) for p in sorted(r.open_ports)[:6]) or "—"
-        ts     = _short_ts(r.last_seen)
+        ts     = _short_ts(r.last_heard_from)
         hits   = _probe_hits(r.access_results) if r.assessed else "not assessed"
         print(f"  {r.ip:<17} {alias:<16} {ports:<16} {ts:<17} {hits}")
     print()
@@ -281,12 +281,12 @@ def cmd_list_hosts_long(state: HostState) -> None:
     for r in hosts:
         alias = r.ssh_alias or "—"
         ports = ", ".join(str(p) for p in sorted(r.open_ports)) or "—"
-        ts    = _short_ts(r.last_seen)
+        ts    = _short_ts(r.last_heard_from)
         mac   = r.mac_address or "—"
 
         # ── card header ──────────────────────────────────────────
         print(f"\n  ── {r.ip} {'─' * (W - len(r.ip) - 4)}")
-        print(f"  {'alias:':<10} {alias:<22}  {'last seen:':<10} {ts}")
+        print(f"  {'alias:':<10} {alias:<22}  {'last heard:':<10} {ts}")
         print(f"  {'ports:':<10} {ports:<22}  {'mac:':<10} {mac}")
         if r.hostnames:
             print(f"  {'names:':<10} {', '.join(r.hostnames)}")
@@ -431,7 +431,7 @@ def cmd_show_host(ip: str, state: HostState) -> None:
     if rec.local_services:
         print(f"  Local proto  {' | '.join(rec.local_services)}")
     print(f"  First seen   {rec.first_seen}")
-    print(f"  Last seen    {rec.last_seen}")
+    print(f"  Last heard   {rec.last_heard_from}")
     print(f"  Assessed     {'yes' if rec.assessed else 'no'}")
     print(f"  Open ports   {', '.join(str(p) for p in sorted(rec.open_ports)) or '—'}")
     if rec.os_guess:
@@ -881,7 +881,9 @@ def cmd_ssh_status(ip: str, state: HostState) -> None:
 
     # 6. their pubkey in our authorized_keys
     ok6, their_pub = _ssh_run(alias,
-        "cat $(ls ~/.ssh/*.pub 2>/dev/null | head -1) 2>/dev/null")
+        "if [ -f ~/.ssh/netwatch_id_ed25519.pub ]; then "
+        "cat ~/.ssh/netwatch_id_ed25519.pub; "
+        "else ls ~/.ssh/*.pub 2>/dev/null | head -1 | xargs -r cat 2>/dev/null; fi")
     if ok6 and their_pub.startswith("ssh-"):
         ak = Path.home() / ".ssh" / "authorized_keys"
         their_key_here = ak.exists() and their_pub.split()[1] in ak.read_text()
@@ -905,17 +907,18 @@ def cmd_ssh_status(ip: str, state: HostState) -> None:
 
     # 8. reverse SSH: from remote, SSH back to this machine
     if our_ip:
+        reverse_target = f"nw-{our_ip}" if their_cfg_ok else our_ip
         ok8, rev_out = _ssh_run(alias,
             f"ssh -o BatchMode=yes -o ConnectTimeout=5 "
-            f"-o StrictHostKeyChecking=accept-new {our_ip} "
+            f"-o StrictHostKeyChecking=accept-new {reverse_target} "
             f"'echo netwatch-reverse-ok' 2>&1",
             timeout=15)
         reverse_ok = "netwatch-reverse-ok" in rev_out
         _row(reverse_ok, "reverse ssh",
-             f"{ip} → {our_ip}: ok" if reverse_ok
+             f"{ip} → {reverse_target}: ok" if reverse_ok
              else (rev_out[:60] or "no response"))
         log.info("[ssh-status] reverse ssh %s→%s → %s  %s",
-                 ip, our_ip, "ok" if reverse_ok else "FAIL", rev_out[:80])
+                 ip, reverse_target, "ok" if reverse_ok else "FAIL", rev_out[:80])
     else:
         _row(None, "reverse ssh", "could not determine our source IP")
 

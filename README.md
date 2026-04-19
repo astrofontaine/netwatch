@@ -319,6 +319,10 @@ Run against every new host (or on demand with `-a`). Controlled by `access_probe
 
 Uses `nmap -sV` if available, otherwise falls back to raw socket connects. Probes ~26 common ports including SSH, HTTP/S, SMB, RDP, MQTT, SNMP, Redis, MongoDB, and more.
 
+netwatch treats discovered hosts as direct network targets. It does not use
+`~/.ssh/config` hostname or port overrides to route probes through reverse
+tunnels or other local SSH aliases.
+
 ### SSH
 
 1. Tries paramiko with all stored credentials (host-specific first, then `_default`).

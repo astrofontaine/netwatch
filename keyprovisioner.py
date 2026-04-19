@@ -38,6 +38,8 @@ NETWATCH_PUB    = SSH_DIR / "netwatch_id_ed25519.pub"
 SSH_CONFIG      = SSH_DIR / "config"
 AUTHORIZED_KEYS = SSH_DIR / "authorized_keys"
 KNOWN_HOSTS     = SSH_DIR / "known_hosts"
+REMOTE_NETWATCH_KEY = "~/.ssh/netwatch_id_ed25519"
+REMOTE_NETWATCH_PUB = "~/.ssh/netwatch_id_ed25519.pub"
 
 _file_lock = threading.Lock()   # serialise all local SSH-dir writes
 
@@ -85,37 +87,9 @@ def _update_ssh_config_local(ip: str, user: str, alias: str = "") -> str:
     if not alias:
         alias = ip
 
-    # Preserve any existing HostName/Port override (e.g. tunnel routing).
-    # Read effective params BEFORE overwriting so tunnel configs survive re-provision.
-    hostname, port = ip, 22
     SSH_CONFIG.touch(mode=0o600)
     existing = SSH_CONFIG.read_text()
-    if f"# >>> netwatch: {ip}" in existing:
-        try:
-            r = subprocess.run(["ssh", "-G", alias],
-                               capture_output=True, text=True, timeout=3)
-            for line in r.stdout.splitlines():
-                k, _, v = line.partition(' ')
-                if k == 'hostname':
-                    hostname = v
-                elif k == 'port' and v.isdigit():
-                    port = int(v)
-        except Exception:
-            pass
-
-    port_line = f"    Port {port}\n" if port != 22 else ""
-    host_ident = NETWATCH_KEY
     block = (
-        f"# >>> netwatch: {ip}\n"
-        f"Host {alias}\n"
-        f"    HostName {hostname}\n"
-        f"{port_line}"
-        f"    User {user}\n"
-        f"    IdentityFile {host_ident}\n"
-        f"    StrictHostKeyChecking no\n"
-        f"    UserKnownHostsFile /dev/null\n"
-        f"# <<< netwatch: {ip}\n"
-    ) if hostname != ip or port != 22 else (
         f"# >>> netwatch: {ip}\n"
         f"Host {alias}\n"
         f"    HostName {ip}\n"
@@ -158,7 +132,7 @@ def _replace_or_append_block(text: str, ip: str, block: str) -> str:
     start = f"# >>> netwatch: {ip}"
     end   = f"# <<< netwatch: {ip}"
     pattern = re.compile(
-        rf'^{re.escape(start)}.*?^{re.escape(end)}\n?',
+        rf'^{re.escape(start)}\s*$.*?^{re.escape(end)}\s*$\n?',
         re.MULTILINE | re.DOTALL,
     )
     if pattern.search(text):
@@ -213,15 +187,14 @@ def _install_our_key_on_remote(client, our_pubkey: str) -> bool:
 
 
 def _ensure_remote_keypair(client) -> str | None:
-    """Ensure remote has an ed25519 keypair; return their pubkey or None."""
-    # Check for any existing pubkey
+    """Ensure remote has the dedicated netwatch ed25519 keypair; return its pubkey."""
     rc, out = _rexec(client,
-        "if ls ~/.ssh/*.pub 2>/dev/null | head -1 | grep -q .; then "
-        "  cat $(ls ~/.ssh/*.pub | head -1); "
+        f"if [ -f {REMOTE_NETWATCH_PUB} ]; then "
+        f"  cat {REMOTE_NETWATCH_PUB}; "
         "else "
         "  mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
-        "  ssh-keygen -t ed25519 -N '' -q -f ~/.ssh/id_ed25519 && "
-        "  cat ~/.ssh/id_ed25519.pub; "
+        f"  ssh-keygen -t ed25519 -N '' -q -f {REMOTE_NETWATCH_KEY} && "
+        f"  cat {REMOTE_NETWATCH_PUB}; "
         "fi"
     )
     if rc != 0 or not out.strip():
@@ -244,7 +217,9 @@ def _update_ssh_config_remote(client, our_ip: str, our_user: str) -> bool:
         f"Host {alias}\\n"
         f"    HostName {our_ip}\\n"
         f"    User {our_user}\\n"
+        f"    IdentityFile {REMOTE_NETWATCH_KEY}\\n"
         f"    StrictHostKeyChecking accept-new\\n"
+        f"    UserKnownHostsFile ~/.ssh/known_hosts\\n"
         f"# <<< netwatch: {our_ip}\\n"
     )
     # Use python3 on the remote to update the config file safely
@@ -260,7 +235,7 @@ block = "{block}"
 start = "# >>> netwatch: {our_ip}"
 end   = "# <<< netwatch: {our_ip}"
 pattern = re.compile(
-    r'^' + re.escape(start) + r'.*?^' + re.escape(end) + r'\\n?',
+    r'^' + re.escape(start) + r'\\s*$.*?^' + re.escape(end) + r'\\s*$\\n?',
     re.MULTILINE | re.DOTALL)
 if pattern.search(text):
     text = pattern.sub(block, text)
@@ -277,7 +252,9 @@ print('ok')
             f"Host {alias}\n"
             f"    HostName {our_ip}\n"
             f"    User {our_user}\n"
+            f"    IdentityFile {REMOTE_NETWATCH_KEY}\n"
             f"    StrictHostKeyChecking accept-new\n"
+            f"    UserKnownHostsFile ~/.ssh/known_hosts\n"
             f"# <<< netwatch: {our_ip}\n"
         )
         safe = block_raw.replace("'", "'\\''")
@@ -290,6 +267,22 @@ print('ok')
             log.warning("  Could not update remote ~/.ssh/config: %s", out2.strip())
             return False
     log.info("  Remote ~/.ssh/config updated: Host %s → %s@%s", alias, our_user, our_ip)
+    return True
+
+
+def _refresh_remote_known_hosts(client, our_ip: str) -> bool:
+    """Replace the remote known_hosts entry for our_ip with the current host key."""
+    script = (
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh; "
+        "touch ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts; "
+        f"ssh-keygen -R '{our_ip}' -f ~/.ssh/known_hosts >/dev/null 2>&1 || true; "
+        f"ssh-keyscan -T 3 -H '{our_ip}' >> ~/.ssh/known_hosts 2>/dev/null"
+    )
+    rc, out = _rexec(client, script)
+    if rc != 0:
+        log.warning("  Could not refresh remote known_hosts for %s: %s", our_ip, out.strip())
+        return False
+    log.info("  Remote known_hosts updated for %s", our_ip)
     return True
 
 
@@ -337,6 +330,7 @@ class KeyProvisioner:
             "their_key_installed":  False,
             "our_config_updated":   False,
             "their_config_updated": False,
+            "their_known_hosts_updated": False,
             "test_passed":          False,
             "alias":                alias,
             "error":                "",
@@ -382,6 +376,7 @@ class KeyProvisioner:
             result["their_config_updated"] = _update_ssh_config_remote(
                 client, our_ip, our_user
             )
+            result["their_known_hosts_updated"] = _refresh_remote_known_hosts(client, our_ip)
 
         # 5 — test
         if result["our_config_updated"]:
