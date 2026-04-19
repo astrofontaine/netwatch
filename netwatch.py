@@ -316,13 +316,13 @@ def cmd_list_hosts_long(state: HostState) -> None:
 
 
 def cmd_refresh_dns(state: HostState) -> None:
-    """Reverse-DNS all known hosts and populate ssh_alias where unset."""
+    """Refresh aliases from known hostnames first, then PTR fallback."""
     import threading
     lock = threading.Lock()
     updated: list[str] = []
 
     def lookup(rec) -> None:
-        name = dns_reverse_lookup(rec.ip)
+        name = rec.hostnames[0] if rec.hostnames else dns_reverse_lookup(rec.ip)
         if not name:
             return
         with lock:
@@ -339,12 +339,12 @@ def cmd_refresh_dns(state: HostState) -> None:
 
     if updated:
         state.save()
-        log.info("[dns] Updated %d alias(es): %s", len(updated), ", ".join(updated))
+        log.info("[alias-refresh] Updated %d alias(es): %s", len(updated), ", ".join(updated))
         for entry in updated:
             print(f"  {entry}")
     else:
-        log.info("[dns] No new aliases found.")
-        print("  No new DNS aliases found.")
+        log.info("[alias-refresh] No new aliases found.")
+        print("  No new aliases found.")
 
 
 def cmd_force_assess(ip: str, cfg: Config, vault: CredVault, state: HostState) -> None:
