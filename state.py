@@ -32,6 +32,7 @@ class HostRecord:
     first_seen: str        = field(default_factory=_now)
     last_seen: str         = field(default_factory=_now)
     hostnames: list[str]   = field(default_factory=list)
+    local_services: list[str] = field(default_factory=list)
     open_ports: list[int]  = field(default_factory=list)
     services: dict[int, str] = field(default_factory=dict)   # port → banner
     os_guess: str          = ""

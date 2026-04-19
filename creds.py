@@ -37,11 +37,22 @@ VAULT_FILE = NETWATCH_DIR / "vault.enc"
 SALT_FILE  = NETWATCH_DIR / ".vault.salt"   # 0600
 
 
+class MissingDependencyError(RuntimeError):
+    """Raised when the selected Python interpreter lacks required packages."""
+
+
 # ── crypto helpers ────────────────────────────────────────────────────────────
 
 def _derive_key(passphrase: str, salt: bytes) -> bytes:
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-    from cryptography.hazmat.primitives import hashes
+    try:
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+    except ModuleNotFoundError as exc:
+        raise MissingDependencyError(
+            "Missing Python dependency 'cryptography'. "
+            "Run './netwatch ...' so the project venv is used, or install "
+            "requirements.txt into the interpreter you launched."
+        ) from exc
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -73,7 +84,14 @@ class CredVault:
 
     def unlock(self, passphrase: Optional[str] = None) -> bool:
         """Decrypt vault from disk.  Prompts for passphrase if not supplied."""
-        from cryptography.fernet import Fernet, InvalidToken
+        try:
+            from cryptography.fernet import Fernet, InvalidToken
+        except ModuleNotFoundError as exc:
+            raise MissingDependencyError(
+                "Missing Python dependency 'cryptography'. "
+                "Run './netwatch ...' so the project venv is used, or install "
+                "requirements.txt into the interpreter you launched."
+            ) from exc
 
         if passphrase is None:
             passphrase = getpass.getpass("Vault passphrase: ")

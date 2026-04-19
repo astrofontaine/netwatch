@@ -28,8 +28,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, NETWATCH_DIR
-from creds import CredVault
-from discover import Discoverer, get_mac, get_hostnames
+from creds import CredVault, MissingDependencyError
+from discover import Discoverer, get_local_services, get_mac, get_hostnames
 from accessor import Accessor
 from state import HostState
 
@@ -89,11 +89,17 @@ def run_cycle(
     accessor: Accessor,
     sudo_pass: str,
 ) -> None:
-    log.info("─── Discovery cycle starting — subnet %s", cfg.subnet)
+    subnets = cfg.target_subnets()
+    log.info("─── Discovery cycle starting — subnets %s", ", ".join(subnets))
 
-    discoverer = Discoverer(cfg.subnet, cfg.discovery_techniques, sudo_pass)
+    os.environ["NETWATCH_PING_TIMEOUT"] = str(cfg.ping_timeout_seconds)
+    os.environ["NETWATCH_TCP_SWEEP_TIMEOUT"] = str(cfg.tcp_sweep_timeout_seconds)
+    discoverer = Discoverer(cfg.subnet, cfg.discovery_techniques, sudo_pass, cfg.extra_subnets)
     live_ips   = discoverer.discover()
     log.info("Discovery complete: %d live host(s) found.", len(live_ips))
+    if cfg.remember_successful_subnets(live_ips):
+        cfg.save()
+        log.info("[config] Updated successful subnet history: %s", ", ".join(cfg.successful_subnets))
 
     new_hosts, gone_hosts = state.update(live_ips)
 
@@ -106,8 +112,8 @@ def run_cycle(
         if mac:
             state.update_record(ip, mac_address=mac)
 
-    # Resolve hostnames in parallel — uses external tools so can be slow
-    _enrich_hostnames(state, live_ips)
+    # Resolve hostnames and local protocol signals in parallel.
+    _enrich_identity(state, live_ips)
 
     if new_hosts:
         log.info("NEW host(s): %s — starting assessment.", ", ".join(sorted(new_hosts)))
@@ -184,17 +190,21 @@ def _short_ts(iso: str) -> str:
 
 # ── CLI commands ──────────────────────────────────────────────────────────────
 
-def _enrich_hostnames(state: HostState, ips: set[str]) -> None:
-    """Resolve hostnames for a set of IPs in parallel threads."""
+def _enrich_identity(state: HostState, ips: set[str]) -> None:
+    """Resolve hostnames and local protocol observations for a set of IPs."""
     import threading
     lock = threading.Lock()
     results: dict[str, list[str]] = {}
+    local_services: dict[str, list[str]] = {}
 
     def resolve(ip: str) -> None:
         names = get_hostnames(ip)
-        if names:
-            with lock:
+        services = get_local_services(ip)
+        with lock:
+            if names:
                 results[ip] = names
+            if services:
+                local_services[ip] = services
 
     threads = [threading.Thread(target=resolve, args=(ip,), daemon=True) for ip in ips]
     for t in threads:
@@ -206,9 +216,16 @@ def _enrich_hostnames(state: HostState, ips: set[str]) -> None:
         rec = state.get(ip)
         if rec and sorted(rec.hostnames) != names:
             state.update_record(ip, hostnames=names)
+    for ip, services in local_services.items():
+        rec = state.get(ip)
+        if rec and sorted(rec.local_services) != services:
+            state.update_record(ip, local_services=services)
     if results:
         log.info("[names] Resolved hostname(s) for: %s",
                  ", ".join(f"{ip}={v[0]}" for ip, v in sorted(results.items())))
+    if local_services:
+        log.info("[local] Local protocol detail for: %s",
+                 ", ".join(f"{ip}={len(v)} signal(s)" for ip, v in sorted(local_services.items())))
 
 
 def _refresh_macs(state: HostState) -> None:
@@ -268,6 +285,8 @@ def cmd_list_hosts_long(state: HostState) -> None:
         print(f"  {'ports:':<10} {ports:<22}  {'mac:':<10} {mac}")
         if r.hostnames:
             print(f"  {'names:':<10} {', '.join(r.hostnames)}")
+        if r.local_services:
+            print(f"  {'local:':<10} {' | '.join(r.local_services[:3])}")
         if not r.assessed:
             print(f"  (not yet assessed)")
             continue
@@ -404,6 +423,8 @@ def cmd_show_host(ip: str, state: HostState) -> None:
         print(f"  MAC          {rec.mac_address}")
     if rec.hostnames:
         print(f"  Hostnames    {', '.join(rec.hostnames)}")
+    if rec.local_services:
+        print(f"  Local proto  {' | '.join(rec.local_services)}")
     print(f"  First seen   {rec.first_seen}")
     print(f"  Last seen    {rec.last_seen}")
     print(f"  Assessed     {'yes' if rec.assessed else 'no'}")
@@ -925,6 +946,8 @@ def main() -> None:
     cfg = Config.load()
     if args.subnet:
         cfg.subnet = args.subnet
+        cfg.extra_subnets = []
+        cfg.successful_subnets = []
     if args.no_sudo:
         cfg.sudo_required = False
     if args.quiet:
@@ -932,8 +955,11 @@ def main() -> None:
 
     setup_logging(cfg.log_level)
 
-    log.info("─── netwatch starting  pid=%d  subnet=%s  interval=%ds  sudo=%s",
-             os.getpid(), cfg.subnet, cfg.interval_seconds, cfg.sudo_required)
+    log.info("─── netwatch starting  pid=%d  subnet=%s  extra_subnets=[%s]  "
+             "successful_subnets=[%s]  interval=%ds  sudo=%s",
+             os.getpid(), cfg.subnet, ", ".join(cfg.extra_subnets),
+             ", ".join(cfg.successful_subnets),
+             cfg.interval_seconds, cfg.sudo_required)
     log.info("    discovery : %s", "  ".join(cfg.discovery_techniques))
     log.info("    probes    : %s", "  ".join(cfg.access_probes))
 
@@ -942,7 +968,12 @@ def main() -> None:
     needs_vault = (args.add_cred or args.list_creds or args.once or args.daemon
                    or args.assess or args.provision_ssh)
     if needs_vault:
-        if not vault.unlock():
+        try:
+            unlocked = vault.unlock()
+        except MissingDependencyError as exc:
+            print(exc, file=sys.stderr)
+            sys.exit(2)
+        if not unlocked:
             sys.exit(1)
 
     # ── credential management commands ────────────────────────────────────────
@@ -1026,7 +1057,8 @@ def main() -> None:
 
     if args.daemon:
         interval = args.interval or cfg.interval_seconds
-        log.info("Daemon mode: interval=%ds, subnet=%s", interval, cfg.subnet)
+        log.info("Daemon mode: interval=%ds, subnets=%s", interval,
+                 ", ".join(cfg.target_subnets()))
         while True:
             try:
                 run_cycle(cfg, vault, state, accessor, sudo_pass)

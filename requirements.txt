@@ -1,0 +1,4 @@
+cryptography
+paramiko
+requests
+scapy

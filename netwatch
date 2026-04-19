@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$ROOT_DIR/.venv"
+PYTHON_BIN="$VENV_DIR/bin/python"
+STAMP_FILE="$VENV_DIR/.netwatch-deps-installed"
+REQ_FILE="$ROOT_DIR/requirements.txt"
+
+choose_bootstrap_python() {
+    if [ -x /usr/bin/python3 ]; then
+        printf '%s\n' /usr/bin/python3
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s\n' "$(command -v python3)"
+        return 0
+    fi
+    printf 'No usable python3 interpreter found.\n' >&2
+    exit 1
+}
+
+ensure_venv() {
+    if [ -x "$PYTHON_BIN" ]; then
+        return 0
+    fi
+    local bootstrap_python
+    bootstrap_python="$(choose_bootstrap_python)"
+    "$bootstrap_python" -m venv "$VENV_DIR"
+}
+
+ensure_deps() {
+    if [ ! -f "$REQ_FILE" ]; then
+        return 0
+    fi
+    if [ ! -f "$STAMP_FILE" ] || [ "$REQ_FILE" -nt "$STAMP_FILE" ]; then
+        "$VENV_DIR/bin/pip" install --upgrade pip setuptools wheel
+        "$VENV_DIR/bin/pip" install -r "$REQ_FILE"
+        touch "$STAMP_FILE"
+    fi
+}
+
+ensure_venv
+ensure_deps
+
+exec "$PYTHON_BIN" "$ROOT_DIR/netwatch.py" "$@"

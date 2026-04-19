@@ -47,25 +47,33 @@ Installs apt packages: `nmap`, `arp-scan`, `fping`, `masscan`, `netdiscover`, `s
 
 Also installs a cron entry: `*/5 * * * * python3 /path/to/netwatch.py --once`.
 
+For interactive local use, prefer the repo launcher:
+
+```bash
+./netwatch --help
+```
+
+It uses the project's `.venv` and avoids broken system `python3` shims on machines like this macOS setup.
+
 ---
 
 ## Quick start
 
 ```bash
 # First run — seed the vault with credentials
-python3 netwatch.py -c
+./netwatch -c
 
 # Run one discovery + assessment cycle
-python3 netwatch.py -o
+./netwatch -o
 
 # See what was found
-python3 netwatch.py -l
+./netwatch -l
 
 # See full detail per host
-python3 netwatch.py -L
+./netwatch -L
 
 # Start the daemon
-python3 netwatch.py -d
+./netwatch -d
 ```
 
 ---
@@ -341,6 +349,7 @@ State is persisted at `~/.netwatch/hosts.json`. Every field change is logged to 
 | `ip` | IP address |
 | `mac_address` | MAC from ARP cache or `ip neigh` |
 | `hostnames` | All resolvable names (DNS, mDNS, NetBIOS) |
+| `local_services` | Bonjour/mDNS and SSDP observations tied to the host |
 | `ssh_alias` | Friendly name set with `-A` |
 | `first_seen` | ISO timestamp of first discovery |
 | `last_seen` | ISO timestamp of most recent discovery |
@@ -381,7 +390,7 @@ python3 netwatch.py -H 192.168.2.1
 ```
 netwatch/
 ├── netwatch.py        # CLI entrypoint, argument parsing, daemon loop, all commands
-├── discover.py        # 8 parallel discovery techniques + MAC/hostname enrichment
+├── discover.py        # parallel discovery techniques + MAC/hostname/local-protocol enrichment
 ├── accessor.py        # portscan → SSH → HTTP → SNMP → SMB probes
 ├── creds.py           # Fernet-encrypted credential vault
 ├── state.py           # Host state persistence with field-level change logging
