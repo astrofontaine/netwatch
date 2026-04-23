@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import logging
+import os
 from dataclasses import dataclass, field, asdict, fields as dc_fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,8 +105,13 @@ class HostState:
             d = asdict(rec)
             d["services"] = {str(k): v for k, v in d["services"].items()}
             data[ip] = d
-        with open(path, "w") as fh:
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        with open(tmp_path, "w") as fh:
             json.dump(data, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
         log.debug("[state] Saved %d host record(s) to %s", len(self._hosts), path)
 
     # ── history ───────────────────────────────────────────────────────────────

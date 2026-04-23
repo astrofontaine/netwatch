@@ -114,10 +114,10 @@ def probe_portscan(ip: str, cfg: "Config") -> dict[int, str]:
     return open_ports
 
 
-def probe_ssh(ip: str, cfg: "Config", vault: "CredVault") -> str:
-    """Try stored SSH credentials.  Returns result summary."""
+def probe_ssh(ip: str, cfg: "Config", vault: "CredVault") -> tuple[str, str]:
+    """Try stored SSH credentials.  Returns (ssh summary, privilege summary)."""
     if not _tcp_open(ip, 22):
-        return "port closed"
+        return "port closed", "not checked"
 
     try:
         import paramiko
@@ -127,9 +127,12 @@ def probe_ssh(ip: str, cfg: "Config", vault: "CredVault") -> str:
 
     creds = vault.get(ip, "ssh")
     if not creds:
-        return "no credentials"
+        return "no credentials", "not checked"
 
+    first_success = ""
+    best_privilege = ""
     for c in creds:
+        client = None
         try:
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -163,22 +166,46 @@ def probe_ssh(ip: str, cfg: "Config", vault: "CredVault") -> str:
                 except Exception as exc:
                     log.debug("SSH state snapshot failed for %s: %s", ip, exc)
 
-            client.close()
+            privilege = _probe_privilege_paramiko(ip, vault, client, c)
+            _remember_successful_ssh_cred(ip, vault, c)
             suffix = f" alias={alias}" if alias else ""
-            return f"SUCCESS user={c['user']} banner={banner!r}{suffix}"
+            summary = f"SUCCESS user={c['user']} banner={banner!r}{suffix}"
+            if not first_success:
+                first_success = summary
+                best_privilege = privilege
+            elif _privilege_rank(privilege) > _privilege_rank(best_privilege):
+                best_privilege = privilege
+
+            if _privilege_rank(privilege) >= 2:
+                return summary, privilege
 
         except paramiko.AuthenticationException:
             log.info("  [%s] SSH auth failed: user=%s", ip, c.get("user"))
         except Exception as exc:
             log.info("  [%s] SSH error: user=%s  %s", ip, c.get("user"), exc)
+        finally:
+            if client is not None:
+                client.close()
 
-    return "auth failed for all stored credentials"
+    if first_success:
+        return first_success, best_privilege or "no sudo/root access confirmed"
+    return "auth failed for all stored credentials", "not checked"
 
 
-def _probe_ssh_cli(ip: str, cfg: "Config", vault: "CredVault") -> str:
+def _privilege_rank(result: str) -> int:
+    if result.startswith("root access confirmed"):
+        return 3
+    if result.startswith("sudo "):
+        return 2
+    if result.startswith("no sudo/root access confirmed"):
+        return 1
+    return 0
+
+
+def _probe_ssh_cli(ip: str, cfg: "Config", vault: "CredVault") -> tuple[str, str]:
     creds = vault.get(ip, "ssh")
     if not creds:
-        return "no credentials"
+        return "no credentials", "not checked"
     for c in creds:
         if c.get("type") == "key_path":
             rc, out = _run([
@@ -197,8 +224,77 @@ def _probe_ssh_cli(ip: str, cfg: "Config", vault: "CredVault") -> str:
         else:
             continue
         if rc == 0:
-            return f"SUCCESS user={c['user']} banner={out.strip()!r}"
-    return "auth failed for all stored credentials"
+            _remember_successful_ssh_cred(ip, vault, c)
+            return f"SUCCESS user={c['user']} banner={out.strip()!r}", "not checked (ssh CLI fallback)"
+    return "auth failed for all stored credentials", "not checked"
+
+
+def _probe_privilege_paramiko(ip: str, vault: "CredVault", client, cred: dict) -> str:
+    """Check root/passwordless sudo/same-password sudo without logging secrets."""
+    user = cred.get("user", "")
+    try:
+        _, stdout, _ = client.exec_command("id -u", timeout=5)
+        uid = stdout.read(64).decode(errors="replace").strip()
+        if uid == "0" or user == "root":
+            _remember_admin_cred(ip, vault, "root", cred)
+            return f"root access confirmed user={user}"
+    except Exception as exc:
+        return f"privilege check failed: {exc}"
+
+    try:
+        _, stdout, _ = client.exec_command(
+            "sudo -n true >/dev/null 2>&1 && echo passwordless || echo no",
+            timeout=5,
+        )
+        result = stdout.read(64).decode(errors="replace").strip()
+        if result == "passwordless":
+            _remember_admin_cred(ip, vault, "sudo", cred)
+            return f"sudo passwordless confirmed user={user}"
+    except Exception:
+        pass
+
+    if cred.get("type") == "password" and cred.get("secret"):
+        try:
+            stdin, stdout, _ = client.exec_command("sudo -S -p '' true", timeout=5)
+            stdin.write(cred["secret"] + "\n")
+            stdin.flush()
+            rc = stdout.channel.recv_exit_status()
+            if rc == 0:
+                _remember_admin_cred(ip, vault, "sudo", cred)
+                return f"sudo with stored password confirmed user={user}"
+        except Exception:
+            pass
+
+    return f"no sudo/root access confirmed user={user}"
+
+
+def _remember_admin_cred(ip: str, vault: "CredVault", service: str, cred: dict) -> None:
+    """Persist the credential that proved root/sudo access under an admin scope."""
+    try:
+        admin_cred = dict(cred)
+        vault.set(ip, service, admin_cred)
+        log.info("  [%s] Stored confirmed %s credential in vault: user=%s type=%s",
+                 ip, service, cred.get("user"), cred.get("type", "?"))
+    except Exception as exc:
+        log.warning("  [%s] Could not persist %s credential: %s", ip, service, exc)
+
+
+def _remember_successful_ssh_cred(ip: str, vault: "CredVault", cred: dict) -> None:
+    """Persist a working fallback SSH credential under the host-specific scope."""
+    try:
+        host_creds = vault._data.get(ip, {}).get("ssh", [])
+        for existing in host_creds:
+            if (
+                existing.get("user") == cred.get("user")
+                and existing.get("secret") == cred.get("secret")
+                and existing.get("type") == cred.get("type")
+            ):
+                return
+        vault.set(ip, "ssh", dict(cred))
+        log.info("  [%s] Stored successful SSH credential in host-specific vault scope: user=%s type=%s",
+                 ip, cred.get("user"), cred.get("type", "?"))
+    except Exception as exc:
+        log.warning("  [%s] Could not persist successful SSH credential: %s", ip, exc)
 
 
 # ── HTTP / HTTPS ──────────────────────────────────────────────────────────────
@@ -303,7 +399,9 @@ class Accessor:
 
         if "ssh" in probes and (22 in open_ports or "ssh" in open_ports.values()):
             log.info("  [%s] SSH probe", ip)
-            results["ssh"] = probe_ssh(ip, self.cfg, self.vault)
+            ssh_result, privilege_result = probe_ssh(ip, self.cfg, self.vault)
+            results["ssh"] = ssh_result
+            results["privilege"] = privilege_result
 
         if "http" in probes:
             log.info("  [%s] HTTP probe", ip)

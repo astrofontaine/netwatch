@@ -31,6 +31,8 @@ All data lives under `~/.netwatch/` (not in the repo):
 - **Discovery is always parallel** — `Discoverer.discover()` runs all configured techniques in threads and merges results.
 - **Vault is locked at rest** — `CredVault.unlock()` decrypts into memory; `lock()` re-encrypts and wipes. Always call `lock()` before exit.
 - **Credentials fall back to `_default`** — `vault.get(host, service)` merges host-specific creds on top of `_default` creds.
+- **Successful fallback SSH credentials are remembered** — if a `_default` or otherwise guessed SSH credential successfully authenticates to a host, `accessor.py` persists that same credential under the host-specific `ssh` vault scope so future access does not depend only on broad defaults.
+- **Admin access is assessed separately** — successful SSH probes also check root access, passwordless sudo, and sudo with the stored password. Confirmed admin credentials are persisted under host-specific `root` or `sudo` vault scopes.
 - **SSH probes try paramiko first**, fall back to `sshpass`+ssh CLI if paramiko is absent.
 - **SSH config blocks are marker-delimited** — `# >>> netwatch: <ip>` / `# <<< netwatch: <ip>` so re-provision is safe.
 - **`HostRecord.assessed`** is set to `True` once an assess cycle completes, preventing redundant re-assessment.
