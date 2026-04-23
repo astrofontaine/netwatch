@@ -265,7 +265,74 @@ def _probe_privilege_paramiko(ip: str, vault: "CredVault", client, cred: dict) -
         except Exception:
             pass
 
+    su_result = _probe_su_root(ip, vault, client, cred)
+    if su_result:
+        return su_result
+
     return f"no sudo/root access confirmed user={user}"
+
+
+def _probe_su_root(ip: str, vault: "CredVault", client, ssh_cred: dict) -> str:
+    """Try su - with stored root credentials over an interactive shell."""
+    for root_cred in _root_password_candidates(ip, vault):
+        password = root_cred.get("secret")
+        if not password:
+            continue
+        try:
+            shell = client.invoke_shell(width=120, height=40)
+            shell.settimeout(5)
+            _drain_shell(shell)
+            shell.send("su -\n")
+            _read_until_shell(shell, ("Password:", "password:"), timeout=5)
+            shell.send(password + "\n")
+            output = _read_until_shell(shell, ("#", "su: Authentication failure", "Authentication failure"), timeout=8)
+            if "Authentication failure" in output:
+                continue
+            shell.send("id -u\n")
+            id_output = _read_until_shell(shell, ("0", "#"), timeout=5)
+            if re.search(r"(^|\D)0(\D|$)", id_output):
+                su_cred = dict(root_cred)
+                su_cred["via_user"] = ssh_cred.get("user", "")
+                vault.set(ip, "su", su_cred)
+                log.info("  [%s] Stored confirmed su credential in vault: via=%s user=%s type=%s",
+                         ip, ssh_cred.get("user"), root_cred.get("user"), root_cred.get("type", "?"))
+                shell.close()
+                return f"su root confirmed via user={ssh_cred.get('user')}"
+            shell.close()
+        except Exception as exc:
+            log.debug("  [%s] su root check failed via user=%s: %s", ip, ssh_cred.get("user"), exc)
+    return ""
+
+
+def _root_password_candidates(ip: str, vault: "CredVault") -> list[dict]:
+    candidates = []
+    for service in ("root", "su", "ssh"):
+        for cred in vault.get(ip, service):
+            if cred.get("type") == "password" and cred.get("user") == "root":
+                key = (cred.get("user"), cred.get("secret"), cred.get("type"))
+                if key not in {(c.get("user"), c.get("secret"), c.get("type")) for c in candidates}:
+                    candidates.append(cred)
+    return candidates
+
+
+def _drain_shell(shell) -> str:
+    data = ""
+    while shell.recv_ready():
+        data += shell.recv(4096).decode(errors="replace")
+    return data
+
+
+def _read_until_shell(shell, needles: tuple[str, ...], timeout: float) -> str:
+    import time
+    deadline = time.time() + timeout
+    data = ""
+    while time.time() < deadline:
+        if shell.recv_ready():
+            data += shell.recv(4096).decode(errors="replace")
+            if any(needle in data for needle in needles):
+                return data
+        time.sleep(0.1)
+    return data
 
 
 def _remember_admin_cred(ip: str, vault: "CredVault", service: str, cred: dict) -> None:
