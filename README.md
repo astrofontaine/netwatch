@@ -118,6 +118,9 @@ python3 netwatch.py -A 192.168.2.1 macbook
 # Verify SSH works both ways to a host
 python3 netwatch.py -S 192.168.2.1
 
+# Install Ollama on a vault-managed host and pull the default model
+NETWATCH_VAULT_PASS=... ./scripts/install_ollama_remote.py qwen --ip 192.168.2.18
+
 # Run daemon with a 10-minute interval on a different subnet
 python3 netwatch.py -d -i 600 -s 10.0.1.0/24
 ```
