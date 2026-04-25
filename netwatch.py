@@ -8,6 +8,7 @@ Usage:
   python3 netwatch.py --list-hosts         # show known hosts
   python3 netwatch.py --list-creds         # show vault contents
   python3 netwatch.py --assess <IP>        # force re-assess a single host
+  python3 netwatch.py --reassess-all       # re-assess all known hosts (manual use only)
   python3 netwatch.py --subnet 10.0.0.0/24 # override subnet
 
 All options can be combined.  Sudo password is prompted once and held in memory.
@@ -361,6 +362,31 @@ def cmd_force_assess(ip: str, cfg: Config, vault: CredVault, state: HostState) -
     state.update_record(ip, **kwargs)
     state.save()
     _log_assessment(ip, results)
+
+
+def cmd_reassess_all(state: HostState, accessor: Accessor) -> None:
+    """Reassess all known hosts — high compute; manual use only."""
+    known_ips = list(state.hosts.keys())
+    if not known_ips:
+        log.info("No known hosts to reassess.")
+        return
+
+    log.info("─── Reassessing all %d known host(s)", len(known_ips))
+    for ip in sorted(known_ips):
+        results = accessor.assess(ip)
+        ssh_alias, ssh_provisioned = _parse_ssh_alias(results.get("ssh", ""))
+        kwargs: dict = {"access_results": results, "assessed": True}
+        if ssh_alias:
+            kwargs["ssh_alias"] = ssh_alias
+            kwargs["ssh_provisioned"] = ssh_provisioned
+        mac = get_mac(ip)
+        if mac:
+            kwargs["mac_address"] = mac
+        state.update_record(ip, **kwargs)
+        _log_assessment(ip, results)
+
+    state.save()
+    log.info("─── Reassessment complete.")
 
 
 def cmd_provision_ssh(ip: str, cfg: Config, vault: CredVault, state: HostState) -> None:
@@ -975,6 +1001,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("-L", "--list-hosts-long",action="store_true", help="host table with probe detail (long)")
     p.add_argument("-C", "--list-creds",action="store_true", help="print vault contents")
     p.add_argument("-a", "--assess",         metavar="IP", help="force re-assess a single host")
+    p.add_argument("--reassess-all",      action="store_true", help="re-assess all known hosts (high compute; manual use only)")
     p.add_argument("-p", "--provision-ssh",  metavar="IP", help="force SSH key provisioning for a host")
     p.add_argument("-H", "--show-host",      metavar="IP", help="show full detail for a host")
     p.add_argument("-S", "--ssh-status",     metavar="IP",   help="verify SSH/SCP access both directions")
@@ -1014,7 +1041,7 @@ def main() -> None:
     # ── vault ─────────────────────────────────────────────────────────────────
     vault = CredVault()
     needs_vault = (args.add_cred or args.list_creds or args.once or args.daemon
-                   or args.assess or args.provision_ssh)
+                   or args.assess or args.reassess_all or args.provision_ssh)
     if needs_vault:
         try:
             unlocked = vault.unlock()
@@ -1025,7 +1052,7 @@ def main() -> None:
             sys.exit(1)
 
     # ── credential management commands ────────────────────────────────────────
-    _more = args.once or args.daemon or args.assess or args.provision_ssh
+    _more = args.once or args.daemon or args.assess or args.reassess_all or args.provision_ssh
 
     if args.add_cred:
         vault.interactive_add()
@@ -1096,6 +1123,16 @@ def main() -> None:
 
     if args.assess:
         cmd_force_assess(args.assess, cfg, vault, state)
+        if not (args.once or args.daemon or args.reassess_all):
+            vault.lock()
+            return
+
+    if args.reassess_all:
+        sudo_cfg = Config(**cfg.__dict__)
+        sudo_cfg.sudo_required = runtime_sudo_required
+        sudo_pass = get_sudo_pass(sudo_cfg)
+        accessor = Accessor(cfg, vault)
+        cmd_reassess_all(state, accessor)
         if not (args.once or args.daemon):
             vault.lock()
             return
