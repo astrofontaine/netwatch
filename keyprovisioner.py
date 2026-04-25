@@ -54,6 +54,20 @@ def _our_source_ip(remote_ip: str) -> str:
     return m.group(1) if m else "127.0.0.1"
 
 
+def _get_our_hostname() -> str:
+    """Get local hostname, validate it as a friendly name."""
+    try:
+        r = subprocess.run(["hostname", "-s"], capture_output=True, text=True, timeout=3)
+        if r.returncode == 0:
+            hostname = r.stdout.strip()
+            # Validate: hostname should be alphanumeric + hyphens/underscores
+            if hostname and re.match(r'^[a-zA-Z0-9._-]+$', hostname):
+                return hostname.lower()
+    except Exception:
+        pass
+    return ""
+
+
 def _ensure_netwatch_keypair() -> str:
     """Generate ~/.ssh/netwatch_id_ed25519 if absent. Returns pubkey content."""
     SSH_DIR.mkdir(mode=0o700, exist_ok=True)
@@ -83,27 +97,53 @@ def _add_to_authorized_keys(pubkey: str) -> None:
 
 
 def _update_ssh_config_local(ip: str, user: str, alias: str = "") -> str:
-    """Add/replace a marker-delimited Host block for ip. Returns alias used."""
+    """Add/replace a marker-delimited Host block for ip. Returns alias used.
+
+    Creates two aliases if a friendly hostname is provided:
+      - The friendly hostname (primary)
+      - nw-<ip> (fallback)
+    """
     if not alias:
         alias = ip
 
+    fallback_alias = f"nw-{ip}"
+    # Use friendly alias if provided and valid, otherwise use IP
+    primary_alias = alias if alias and alias != ip else fallback_alias
+
     SSH_CONFIG.touch(mode=0o600)
     existing = SSH_CONFIG.read_text()
-    block = (
-        f"# >>> netwatch: {ip}\n"
-        f"Host {alias}\n"
-        f"    HostName {ip}\n"
-        f"    User {user}\n"
-        f"    IdentityFile {NETWATCH_KEY}\n"
-        f"    StrictHostKeyChecking accept-new\n"
-        f"    UserKnownHostsFile {KNOWN_HOSTS}\n"
-        f"# <<< netwatch: {ip}\n"
-    )
+
+    # Create config block with both primary and fallback aliases
+    if primary_alias == fallback_alias:
+        # No friendly name, just use the fallback
+        block = (
+            f"# >>> netwatch: {ip}\n"
+            f"Host {primary_alias}\n"
+            f"    HostName {ip}\n"
+            f"    User {user}\n"
+            f"    IdentityFile {NETWATCH_KEY}\n"
+            f"    StrictHostKeyChecking accept-new\n"
+            f"    UserKnownHostsFile {KNOWN_HOSTS}\n"
+            f"# <<< netwatch: {ip}\n"
+        )
+    else:
+        # Include both friendly name and fallback
+        block = (
+            f"# >>> netwatch: {ip}\n"
+            f"Host {primary_alias} {fallback_alias}\n"
+            f"    HostName {ip}\n"
+            f"    User {user}\n"
+            f"    IdentityFile {NETWATCH_KEY}\n"
+            f"    StrictHostKeyChecking accept-new\n"
+            f"    UserKnownHostsFile {KNOWN_HOSTS}\n"
+            f"# <<< netwatch: {ip}\n"
+        )
+
     SSH_CONFIG.chmod(0o600)
     text = _replace_or_append_block(existing, ip, block)
     SSH_CONFIG.write_text(text)
-    log.info("  Updated our ~/.ssh/config: Host %s", alias)
-    return alias
+    log.info("  Updated our ~/.ssh/config: Host %s", primary_alias)
+    return primary_alias
 
 
 def _add_to_known_hosts(ip: str) -> None:
@@ -208,20 +248,41 @@ def _ensure_remote_keypair(client) -> str | None:
     return pubkey
 
 
-def _update_ssh_config_remote(client, our_ip: str, our_user: str) -> bool:
-    """Push a Host nw-<our_ip> block to remote ~/.ssh/config."""
-    alias = f"nw-{our_ip}"
+def _update_ssh_config_remote(client, our_ip: str, our_user: str, our_hostname: str = "") -> bool:
+    """Push a Host block to remote ~/.ssh/config with optional friendly hostname alias.
+
+    Creates two aliases if a friendly hostname is provided:
+      - The friendly hostname (primary)
+      - nw-<ip> (fallback)
+    """
+    fallback_alias = f"nw-{our_ip}"
+    primary_alias = our_hostname if our_hostname else fallback_alias
+
     # We pass the config block via a python3 one-liner (avoids quoting nightmares)
-    block = (
-        f"# >>> netwatch: {our_ip}\\n"
-        f"Host {alias}\\n"
-        f"    HostName {our_ip}\\n"
-        f"    User {our_user}\\n"
-        f"    IdentityFile {REMOTE_NETWATCH_KEY}\\n"
-        f"    StrictHostKeyChecking accept-new\\n"
-        f"    UserKnownHostsFile ~/.ssh/known_hosts\\n"
-        f"# <<< netwatch: {our_ip}\\n"
-    )
+    if primary_alias == fallback_alias:
+        # No friendly name, just use the fallback
+        block = (
+            f"# >>> netwatch: {our_ip}\\n"
+            f"Host {primary_alias}\\n"
+            f"    HostName {our_ip}\\n"
+            f"    User {our_user}\\n"
+            f"    IdentityFile {REMOTE_NETWATCH_KEY}\\n"
+            f"    StrictHostKeyChecking accept-new\\n"
+            f"    UserKnownHostsFile ~/.ssh/known_hosts\\n"
+            f"# <<< netwatch: {our_ip}\\n"
+        )
+    else:
+        # Include both friendly name and fallback
+        block = (
+            f"# >>> netwatch: {our_ip}\\n"
+            f"Host {primary_alias} {fallback_alias}\\n"
+            f"    HostName {our_ip}\\n"
+            f"    User {our_user}\\n"
+            f"    IdentityFile {REMOTE_NETWATCH_KEY}\\n"
+            f"    StrictHostKeyChecking accept-new\\n"
+            f"    UserKnownHostsFile ~/.ssh/known_hosts\\n"
+            f"# <<< netwatch: {our_ip}\\n"
+        )
     # Use python3 on the remote to update the config file safely
     py_script = f"""
 import re, os
@@ -373,8 +434,9 @@ class KeyProvisioner:
 
         # 4 — update remote ssh config (no file lock needed — different file)
         if our_ip and our_ip != "127.0.0.1":
+            our_hostname = _get_our_hostname()
             result["their_config_updated"] = _update_ssh_config_remote(
-                client, our_ip, our_user
+                client, our_ip, our_user, our_hostname
             )
             result["their_known_hosts_updated"] = _refresh_remote_known_hosts(client, our_ip)
 

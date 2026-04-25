@@ -22,6 +22,24 @@ if TYPE_CHECKING:
 log = logging.getLogger("netwatch.accessor")
 
 
+# ── hostname extraction ───────────────────────────────────────────────────────
+
+def _extract_hostname_from_banner(banner: str) -> str:
+    """Extract hostname from 'uname -a' output.
+
+    Example: 'Linux qwen 6.12.74+deb13+1-amd64 #1...' → 'qwen'
+    """
+    if not banner:
+        return ""
+    parts = banner.split()
+    if len(parts) >= 2:
+        hostname = parts[1]
+        # Validate: hostname should be alphanumeric + hyphens/underscores
+        if re.match(r'^[a-zA-Z0-9._-]+$', hostname):
+            return hostname.lower()
+    return ""
+
+
 # ── low-level helpers ─────────────────────────────────────────────────────────
 
 def _run(cmd: list[str], timeout: int = 15, input_: str | None = None) -> tuple[int, str]:
@@ -154,7 +172,9 @@ def probe_ssh(ip: str, cfg: "Config", vault: "CredVault") -> tuple[str, str]:
             alias = ""
             try:
                 from keyprovisioner import KeyProvisioner
-                prov = KeyProvisioner().provision(ip, c["user"], client)
+                # Extract hostname from uname output for friendly alias
+                hostname = _extract_hostname_from_banner(banner)
+                prov = KeyProvisioner().provision(ip, c["user"], client, alias=hostname)
                 if prov.get("our_key_installed"):
                     alias = prov["alias"]
             except Exception as exc:
