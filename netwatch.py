@@ -839,12 +839,45 @@ def _ssh_run(alias: str, remote_cmd: str, timeout: int = 8) -> tuple[bool, str]:
 
 
 def _check_local_ssh_config(ip: str) -> str:
-    """Return the Host alias from the netwatch block for ip, or ''."""
+    """Return matching Host alias for ip from ~/.ssh/config, or ''.
+
+    Preference order:
+    1) Explicit netwatch-managed block: ``# >>> netwatch: <ip>`` + ``Host <alias>``.
+    2) Any Host stanza where ``HostName`` equals ``ip`` (e.g., rolemap stanzas).
+    """
     cfg = Path.home() / ".ssh" / "config"
     if not cfg.exists():
         return ""
-    m = re.search(rf'# >>> netwatch: {re.escape(ip)}\nHost (\S+)', cfg.read_text())
-    return m.group(1) if m else ""
+    text = cfg.read_text()
+
+    # Preferred: explicit managed block created by netwatch provisioning.
+    m = re.search(
+        rf'(?m)^# >>> netwatch: {re.escape(ip)}\nHost (\S+)\b',
+        text,
+    )
+    if m:
+        return m.group(1)
+
+    # Fallback: parse any Host stanza that points HostName at the target IP.
+    current_alias = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        host_match = re.match(r"(?i)^Host\s+(.+)$", line)
+        if host_match:
+            aliases = host_match.group(1).split()
+            # Ignore wildcard stanzas for alias resolution.
+            current_alias = "" if "*" in aliases else (aliases[0] if aliases else "")
+            continue
+
+        if current_alias:
+            hostname_match = re.match(r"(?i)^HostName\s+(\S+)$", line)
+            if hostname_match and hostname_match.group(1) == ip:
+                return current_alias
+
+    return ""
 
 
 def _check_known_hosts(ip: str) -> bool:
@@ -968,8 +1001,13 @@ def cmd_ssh_status(ip: str, state: HostState) -> None:
     log.info("[ssh-status] their config block for us → %s",
              "ok" if their_cfg_ok else "missing")
 
-    # 8. reverse SSH: from remote, SSH back to this machine
-    if our_ip:
+    # 8. reverse SSH: from remote, SSH back to this machine.
+    # Self-check path (ip == our_ip) is not meaningful and can fail due to
+    # local direct-IP SSH policy differences from alias-based SSH.
+    if our_ip and ip == our_ip:
+        _row(None, "reverse ssh", "skipped — self target")
+        log.info("[ssh-status] reverse ssh %s→self skipped", ip)
+    elif our_ip:
         reverse_target = f"nw-{our_ip}" if their_cfg_ok else our_ip
         ok8, rev_out = _ssh_run(alias,
             f"ssh -o BatchMode=yes -o ConnectTimeout=5 "
