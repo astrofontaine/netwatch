@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "hosts": [
+    {
+      "name": "macbook",
+      "ip": "192.168.2.1",
+      "ssh_user": "davidfontaine",
+      "platform": "darwin"
+    },
+    {
+      "name": "proxmox",
+      "ip": "192.168.2.2",
+      "ssh_user": "root",
+      "platform": "linux"
+    },
+    {
+      "name": "necto",
+      "ip": "192.168.2.11",
+      "ssh_user": "longshot",
+      "platform": "linux"
+    },
+    {
+      "name": "keystone",
+      "ip": "192.168.2.14",
+      "ssh_user": "longshot",
+      "platform": "linux"
+    },
+    {
+      "name": "vega",
+      "ip": "192.168.2.15",
+      "ssh_user": "longshot",
+      "platform": "linux"
+    },
+    {
+      "name": "human",
+      "ip": "192.168.2.16",
+      "ssh_user": "longshot",
+      "platform": "linux"
+    }
+  ]
+}

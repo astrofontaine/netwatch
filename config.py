@@ -268,6 +268,12 @@ class Config:
     ping_timeout_seconds: float = 1.0
     tcp_sweep_timeout_seconds: float = 0.2
     portscan_connect_timeout_seconds: float = 0.25
+    identity_policy: dict[str, object] = field(default_factory=lambda: {
+        "source_of_truth": "netwatch_hosts_json",
+        "hosts_file": str(NETWATCH_DIR / "hosts.json"),
+        "forbid_vmid_to_ip_inference": True,
+        "require_live_ip_verification_if_missing": True,
+    })
 
     log_level: str = "INFO"
 

@@ -1,0 +1,38 @@
+# >>> rolemap
+Host macbook
+    HostName 192.168.2.1
+    User davidfontaine
+    IdentityFile ~/.ssh/netwatch_id_ed25519
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile ~/.ssh/known_hosts
+Host proxmox
+    HostName 192.168.2.2
+    User root
+    IdentityFile ~/.ssh/netwatch_id_ed25519
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile ~/.ssh/known_hosts
+Host necto
+    HostName 192.168.2.11
+    User longshot
+    IdentityFile ~/.ssh/netwatch_id_ed25519
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile ~/.ssh/known_hosts
+Host keystone
+    HostName 192.168.2.14
+    User longshot
+    IdentityFile ~/.ssh/netwatch_id_ed25519
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile ~/.ssh/known_hosts
+Host vega
+    HostName 192.168.2.15
+    User longshot
+    IdentityFile ~/.ssh/netwatch_id_ed25519
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile ~/.ssh/known_hosts
+Host human
+    HostName 192.168.2.16
+    User longshot
+    IdentityFile ~/.ssh/netwatch_id_ed25519
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile ~/.ssh/known_hosts
+# <<< rolemap

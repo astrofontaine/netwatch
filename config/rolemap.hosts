@@ -1,0 +1,8 @@
+# >>> rolemap
+192.168.2.1     macbook
+192.168.2.2     proxmox
+192.168.2.11    necto
+192.168.2.14    keystone
+192.168.2.15    vega
+192.168.2.16    human
+# <<< rolemap
